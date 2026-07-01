@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Environment and secrets
+.env
+*.env
+!.env.example
+secrets/
+*.pem
+*.key
+
+# Data (raw Jigsaw dataset and derived splits are not versioned in git)
+data/
+*.csv
+*.csv.gz
+*.parquet
+
+# Model artifacts (fetched from W&B by digest at deploy time, never committed)
+artifacts/
+*.onnx
+*.skops
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.joblib
+*.pkl
+
+# Weights & Biases local run cache
+wandb/
+
+# Test and lint caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+
+# OS and editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
