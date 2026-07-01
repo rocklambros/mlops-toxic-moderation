@@ -8,6 +8,6 @@ end-to-end on AWS with experiment tracking, a model registry, a served API, a
 human-review workflow, monitoring, and a CI/CD gate.
 
 Design: [`docs/2026-07-01-toxic-moderation-mlops-design.md`](docs/2026-07-01-toxic-moderation-mlops-design.md).
-Implementation plan: [`docs/plans/`](docs/plans/).
+Implementation plan: [`docs/superpowers/plans/2026-07-01-toxic-moderation-master-plan.md`](docs/superpowers/plans/2026-07-01-toxic-moderation-master-plan.md).
 
 This README is a placeholder. The operator-facing README lands in the final phase.
