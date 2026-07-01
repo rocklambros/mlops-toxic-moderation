@@ -21,7 +21,7 @@ Every task inherits these. Values are copied verbatim from the design spec (`doc
 - **Headline metrics: macro-F1 and per-label PR-AUC with confidence intervals.** Accuracy is banned as a headline metric because the class imbalance makes it misleading. It may be logged, never promoted on.
 - **RunPod cost governance.** Ephemeral pods only, no persistent GPU pods. Teardown in a `trap EXIT` / `finally` so the pod dies on success, failure, and interrupt. A scheduled GitHub Action reaper kills pods past a hard TTL or idle threshold. Spending cap plus alarm. Prefer interruptible spot pods for the sweep. Right-size to a mid-tier GPU (L4 / 4090 / A40) and fan out several pods for the sweep rather than renting one large card.
 - **Model output contract (stable interface).** See the interface contracts section. The database and UI never change when the model swaps.
-- **Supply chain (QC.1 / NIST SP 800-218).** Pinned dependencies with hashes where practical, gitleaks secret scanning, semgrep SAST gate on executable additions, a VDP (`SECURITY.md`) for the public project.
+- **Supply chain (QC.1 / NIST SP 800-218).** Pinned dependencies with hashes where practical, gitleaks secret scanning, semgrep SAST gate on executable additions, an SBOM. The repo is private, so the VDP `SECURITY.md` (QC.1 scopes it to public projects) is not mandatory; add it only if the repo is later made public.
 - **Git workflow.** Feature-branch and PR flow. Never commit to main directly (the genesis commit that established main is the sole exception). Human author (`rocklambros <rock@rockcyber.com>`). No AI attribution in commits, code, or docs. If a partner joins, record them and keep both partners' work attributable through branch-and-PR.
 
 ## Repository Structure
@@ -81,7 +81,7 @@ mlops-toxic-moderation/
   pyproject.toml
   README.md               # operator guide, finalized Phase 5
   MODEL_CARD.md           # metrics + provenance, drafted Phase 1, final Phase 5
-  SECURITY.md             # VDP (Phase 5)
+  SECURITY.md             # VDP (Phase 5, only if repo goes public)
   aibom.json              # CycloneDX AIBOM (Phase 5)
 ```
 
@@ -224,7 +224,7 @@ Each phase produces a working, testable increment and lands on its own feature b
 
 **Deliverable:** Two registered W&B artifacts with digests and metric-bearing model cards: the classical winner promoted to Production, and DistilBERT as an ONNX int8 challenger. A `thresholds.json` artifact tuned on validation. Held-out test evaluated exactly once. RunPod cost governance active.
 
-**Branch:** `feat/phase-1-train-register`. **Needs:** raw Jigsaw CSV, W&B account/project, RunPod API key + budget cap, GPU pods.
+**Branch:** `feat/phase-1-train-register`. **Needs:** the Kaggle Jigsaw archive (`julian3833/jigsaw-multilingual-toxic-comment-classification`); use the `jigsaw-toxic-comment-train.csv` English six-label file inside it, not the multilingual `validation.csv`/`test.csv` or `jigsaw-unintended-bias-train.csv`. A new W&B project, RunPod API key + budget cap, GPU pods. Credentials live on the Jetson; AWS region us-west-1. See Resolved Decisions.
 
 **Files:** `model/train_classical.py`, `model/evaluate.py`, `model/thresholds.py`, `model/tracking.py`, `model/sweep.py`, `model/train_distilbert.py`, `model/export_onnx.py`, `infra/runpod/*`, `.github/workflows/runpod-reaper.yml`, `requirements/train.txt`, draft `MODEL_CARD.md`.
 
@@ -325,7 +325,7 @@ Each phase produces a working, testable increment and lands on its own feature b
 
 ## Phase 5: Docker, two-EC2 deploy, README, model card, AIBOM
 
-**Deliverable:** One Docker image per component, a docker-compose local full stack, deploy scripts that stand up EC2 #1 (backend + frontend) and EC2 #2 (monitoring + rescorer) with Docker and pull pinned model artifacts by digest at deploy (verify SHA-256, bake), an RDS Postgres, and the finished operator docs: `README.md`, `MODEL_CARD.md`, CycloneDX `aibom.json`, `SECURITY.md` (VDP), and a rollback plan.
+**Deliverable:** One Docker image per component, a docker-compose local full stack, deploy scripts that stand up EC2 #1 (backend + frontend) and EC2 #2 (monitoring + rescorer) with Docker and pull pinned model artifacts by digest at deploy (verify SHA-256, bake), an RDS Postgres, and the finished operator docs: `README.md`, `MODEL_CARD.md`, CycloneDX `aibom.json`, an `input_text` retention purge job, and a rollback plan (plus a `SECURITY.md` VDP only if the repo becomes public).
 
 **Branch:** `feat/phase-5-deploy-docs`. **Needs:** all component images, W&B digests, measured ONNX int8 throughput (drives EC2 #2 sizing).
 
@@ -336,9 +336,10 @@ Each phase produces a working, testable increment and lands on its own feature b
 2. `infra/ec2_deploy/`: provision two EC2 + RDS (scripted or documented), install Docker, deploy-time artifact fetch from W&B by digest with SHA-256 verify and bake, run per host, least-privilege security groups (EC2 #1 public API, EC2 #2 restricted) and IAM. Resolve EC2 #2 instance class from the measured ONNX throughput.
 3. Finalize `MODEL_CARD.md` + generate CycloneDX `aibom.json`, verify it scores 100% on the AIBOM evaluator. (`writing-model-cards`.)
 4. `README.md` operator guide: architecture, run locally, deploy, endpoints, input_text retention policy, reviewer auth note, cost governance. (`writing-repo-documentation`.)
-5. `SECURITY.md` VDP + coordinated disclosure for the public project. (`writing-vdp-and-coordinated-disclosure`.)
+5. `input_text` retention purge: a scheduled job (cron or a small container) that nulls `predictions.input_text` older than `INPUT_TEXT_RETENTION_DAYS` (default 30), keeping the rest of the row for monitoring. Note it in the model card and README.
 6. Dependency SBOM. (`generating-sbom`.)
 7. Rollback plan. (`building-rollback-plan`; optional `building-canary-rollout`.)
+8. Conditional `SECURITY.md` VDP + coordinated disclosure, only if the repo is made public (it is private now). (`writing-vdp-and-coordinated-disclosure`.)
 
 **Test strategy:** `docker compose up` runs the full stack locally and serves a `/predict` end to end. Deploy scripts validated against a throwaway EC2 + RDS. AIBOM verified by the evaluator.
 
@@ -386,17 +387,32 @@ Monorepo root: `/Users/klambros/github_projects/MLOPS-Comp-4450-1`.
 
 Read the seed before each phase and adapt it; do not rebuild from scratch.
 
-## Open Decisions (resolve before the dependent phase)
+## Resolved Decisions (2026-07-01)
 
-These carry the spec section 18 risks plus plan-level prerequisites. Defaults are proposed; the owner confirms or overrides.
+Answers from the owner. These close the spec section 18 risks and the plan prerequisites.
 
-1. **Accounts and secrets (blocks Phase 1/2/5):** W&B entity/project, RunPod API key + spending cap amount, AWS account/region, RDS + EC2 instance classes. Provision and store as CI/deploy secrets.
-2. **Jigsaw raw data (blocks Phase 1):** confirm the Kaggle download path for the training CSV.
-3. **Reviewer auth (Phase 3):** default is a single reviewer role behind a shared secret. Confirm or request a fuller model.
-4. **input_text retention (Phase 2/5):** default is a configurable retention window with a purge job, documented in the model card. Confirm the window, or choose to store a hash only.
-5. **Partner:** record a pair partner if one joins (affects attribution and PR flow).
-6. **Repo visibility (Phase 5):** public triggers the VDP/`SECURITY.md` requirement (QC.1). Confirm public vs private.
-7. **Phase plan expansion:** author the Phase 1-5 detailed bite-sized plans just-in-time (recommended, since later code depends on earlier artifacts and the measured ONNX throughput), or expand all now.
+1. **Accounts and secrets.** A new W&B project. Credentials (W&B entity, RunPod API key, AWS creds) live on the Jetson, which is the operator and build box: it holds the creds and runs training and deploy. AWS region us-west-1 (N. California). Provisioning happens on the Jetson when we proceed. **Assumption:** the runtime target stays AWS EC2 + RDS per the locked architecture; the Jetson is the control and build machine, not the runtime host. (Say so if you meant the runtime to live on the Jetson; that would contradict the locked "100% AWS runtime.") The Jetson is aarch64, which pairs cleanly with the Graviton (arm64) instances below: build arm64 images on the Jetson, run them on Graviton EC2 directly.
+2. **Jigsaw data.** Kaggle download: `https://www.kaggle.com/api/v1/datasets/download/julian3833/jigsaw-multilingual-toxic-comment-classification`. That archive packages several Jigsaw competitions. Use the file `jigsaw-toxic-comment-train.csv` inside it: the original English Toxic Comment Classification Challenge training set with the six labels (`id, comment_text, toxic, severe_toxic, obscene, threat, insult, identity_hate`), which matches the loader's `REQUIRED_COLUMNS`. Do not train on `jigsaw-unintended-bias-train.csv` (different schema) or `validation.csv` / `test.csv` (multilingual, single label); either would break the English six-label scope.
+3. **Reviewer auth.** Single reviewer role behind a shared secret. Confirmed.
+4. **input_text retention (recommendation).** Retain raw `predictions.input_text` for 30 days, then a scheduled purge nulls `input_text` while keeping the rest of the row (probabilities, decision, flags, timestamps, latency) for long-term monitoring. Rationale: the human-review queue and the drift and accuracy windows need the raw text short-term; keeping user comments (potentially toxic or PII-bearing) indefinitely is an avoidable privacy liability. Configurable via `INPUT_TEXT_RETENTION_DAYS` (default 30). Never write raw text to W&B or application logs; only the access-restricted RDS row holds it. Documented in the model card and README, implemented as a purge job in Phase 5.
+5. **Partner.** Solo. No partner attribution.
+6. **Repo visibility.** Private. The VDP `SECURITY.md` requirement (QC.1, scoped to public projects) is not mandatory. gitleaks, semgrep, and the SBOM stay. Add `SECURITY.md` only if the repo is later made public.
+7. **Python.** 3.11, confirmed (pinned `requires-python = ">=3.11,<3.12"`).
+8. **Phase plan expansion.** Just-in-time per phase (Phase 0 detailed now; 1-5 expanded at the start of each phase). Unchanged.
+
+### AWS instance sizing (us-west-1, low spend, class project)
+
+Recommendation. All Graviton (arm64) to match the aarch64 Jetson build box and to cut roughly 20% off the equivalent x86 on-demand rate. Every dependency (numpy, scipy, scikit-learn, onnxruntime, pydantic) ships aarch64 wheels; skops and datasketch are pure Python. If any wheel misbehaves on arm64, the x86 fallback is in the last column.
+
+| Component | Recommended | vCPU / RAM | Why | x86 fallback |
+|---|---|---|---|---|
+| EC2 #1 (FastAPI classical + Streamlit) | `t4g.medium` | 2 / 4 GB | Low-traffic bursty web serving; 4 GB holds the word + char n-gram TF-IDF vocab, the model, and Streamlit with headroom | `t3.medium` |
+| EC2 #2 (monitoring + DistilBERT ONNX int8 re-scorer) | `t4g.large` (start) | 2 / 8 GB | Async, intermittent queue drain suits a burstable instance; 8 GB covers onnxruntime + tokenizer + dashboard. Confirm or upsize to `c7g.xlarge` (4 vCPU) after measuring ONNX int8 throughput (spec section 18) if the drain is slow or the queue is large and continuous | `c6i.large` / `c6i.xlarge` |
+| RDS Postgres | `db.t4g.micro` | 2 / 1 GB | Tiny predictions table, low write rate, a few time-bucket aggregations and one join. Bump to `db.t4g.small` (2 GB) if the dashboard queries lag | same (RDS engine is arch-agnostic to clients) |
+
+RDS config: Postgres 16, 20 GB gp3 (minimum, cheap), Single-AZ (no Multi-AZ for a class project; it halves the cost), us-west-1.
+
+**Cost control matters more than instance class here.** Stop both EC2 instances and the RDS instance between work sessions; run them only during development and the demo. Approximate us-west-1 on-demand rates (verify in the AWS Pricing Calculator, do not treat as exact): EC2 #1 around $0.037/hr, EC2 #2 around $0.074/hr, RDS around $0.017/hr, so roughly $0.13/hr with everything on. Left running 24/7 that is roughly $90/month; run only during sessions (tens of hours total) and it is a few dollars. gp3 and the 20 GB RDS volume persist at cents/month when stopped. Set a small AWS Budget alarm.
 
 ## Execution Handoff
 
