@@ -70,22 +70,18 @@ That last command succeeding is the gate. Once it does, the bootstrap script can
 
 ---
 
-## About the root email
+## Root user: break-glass, preserved
 
-Short version: **do not treat this as a blocking prerequisite.** I framed it too strongly before. Here is the actual reasoning.
+**Nothing in this project deletes, disables, or revokes a root user.** AWS Organizations centralized root access management is deliberately not enabled. Two reasons, both verified:
 
-AWS requires a unique email per account, so the new account uses `rock+aws-mlops-toxic@rockcyber.com`. `rockcyber.com` routes inbound mail through Mimecast, and Mimecast recipient validation is a known cause of plus-addressed mail being rejected before it reaches the mailbox.
+1. **It has no OU or per-account scoping.** It is organization-wide, so it would reach RCAP `<MGMT_ACCOUNT_ID>` and change that account's root recovery posture. This project's blast-radius boundary is the `Sandbox` OU, and anything that cannot be scoped to it is disqualified.
+2. **`sts:AssumeRoot` is not a substitute for root.** It covers exactly five managed task policies. Restoring IAM user permissions after an admin lockout, activating IAM access to the Billing console, S3 MFA Delete, certain tax invoices, RI Marketplace seller registration, and the KMS unmanageable-key path all still require real root sign-in.
 
-The risk is narrow and specific. Changing a member account's root email requires root sign-in. This design deliberately deletes root credentials and blocks root password recovery. If the address does not deliver **and** root is already locked down, you get a circular dependency: no mail at the address, no way to change the address without root, no way to reach root without mail.
+Root is hardened instead: MFA enrolled, no access keys, never used for routine work, strong password in a password manager, and a CloudTrail plus EventBridge alarm that fires on any root activity.
 
-That risk is handled by **ordering, not by a pre-flight test**. The bootstrap now:
+**The root email matters because it is the break-glass path.** Organizations creates member accounts with no root password, so establishing break-glass means running root password recovery once through `rock+aws-mlops-toxic@rockcyber.com`. `rockcyber.com` routes through Mimecast, whose recipient validation sometimes rejects plus-addressed mail.
 
-1. Creates the account.
-2. Sets BILLING, OPERATIONS, and SECURITY alternate contacts to `rock@rockcyber.com` using `account:PutAlternateContact`, which the management account can do for a member account. Day-to-day billing and security mail then reaches a known-good address regardless of what the root address does.
-3. Pauses for you to confirm mail reached the root address.
-4. Only then deletes root credentials.
-
-So you find out naturally, at a point where it is still fixable. If you would rather skip the question entirely, create a real mail alias `aws-mlops@rockcyber.com` pointing at `rock@rockcyber.com` and use that as the root address. An alias is not a mailbox and costs no license seat.
+This is a thing to confirm early, not a one-way door. The bootstrap sets BILLING, OPERATIONS, and SECURITY alternate contacts to `rock@rockcyber.com`, so operational mail lands regardless, and the management account can change a member account's root email without root credentials if the address turns out to be bad. To skip the question entirely, make `aws-mlops@rockcyber.com` an alias onto `rock@rockcyber.com` and use it as the root address. An alias is not a mailbox and costs no license seat.
 
 ---
 

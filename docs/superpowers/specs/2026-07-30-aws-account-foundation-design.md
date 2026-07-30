@@ -51,13 +51,16 @@ The new member account:
 
 Creating the account through Organizations is what makes root access keys unnecessary. The management account can assume `OrganizationAccountAccessRole` into the new account from the moment it exists, so no phase of this project ever handles a root credential. This is the single largest security improvement over the RCAP bootstrap, which required temporary root access keys.
 
-**Mail delivery, handled by ordering rather than a pre-flight test.** `rockcyber.com` routes inbound mail through Mimecast, whose recipient validation is a known cause of plus-addressed mail being rejected before it reaches the mailbox.
+**Mail delivery is the break-glass dependency.** `rockcyber.com` routes inbound mail through Mimecast, whose recipient validation is a known cause of plus-addressed mail being rejected before it reaches the mailbox.
 
-The risk is narrow. Changing a member account's root email requires root sign-in, and this design deletes root credentials and blocks root password recovery. A dead address plus a locked-down root is a circular dependency.
+This matters because of what section 5.2 preserves rather than what it removes. Organizations creates member accounts with no root password, so establishing the break-glass means running root password recovery once, which sends mail to the root address. If that address does not deliver, there is no break-glass. Root recovery is the whole point of keeping root, so the address has to work.
 
-The bootstrap resolves it by sequencing rather than by asking the operator to test first. After the account is created it sets BILLING, OPERATIONS, and SECURITY alternate contacts to `rock@rockcyber.com` through `account:PutAlternateContact`, which the management account is permitted to do for a member account in the same organization. Operational mail then reaches a known-good address regardless of the root address. The bootstrap then pauses for confirmation that mail reached the root address, and only deletes root credentials afterward, at a point where the address is still changeable.
+Two things make this safe rather than fragile:
 
-A mail alias such as `aws-mlops@rockcyber.com` pointing at `rock@rockcyber.com` sidesteps the question entirely and costs no mailbox or license seat.
+1. The bootstrap sets BILLING, OPERATIONS, and SECURITY alternate contacts to `rock@rockcyber.com` through `account:PutAlternateContact`, which the management account is permitted to do for a member account in the same organization. Operational mail reaches a known-good address regardless of the root address.
+2. The management account can change a member account's root email address without root credentials, because the organization has all features enabled. A bad address is fixable rather than terminal.
+
+So this is a thing to confirm early, not a one-way door. Confirm root password recovery reaches you, set a strong password, enroll MFA, and store both. A mail alias such as `aws-mlops@rockcyber.com` pointing at `rock@rockcyber.com` sidesteps plus-addressing entirely and costs no mailbox or license seat.
 
 ## 4. Identity model
 
@@ -118,42 +121,30 @@ Every condition key below was verified against the AWS machine-readable service 
 
 The EC2 instance-type allowlist is the compensating control for declining an auto-stop budget action. Cost overrun on compute requires an SCP violation first. RDS does not get that protection, which is a stated gap rather than an assumed control.
 
-### 5.2 Root credential removal
+### 5.2 Root user posture: hardened, preserved, never revoked
 
-Verified against the botocore service models for `iam` and `sts` (1.43.60) and the IAM User Guide. This is a two-part mechanism, and conflating the parts was an error in the first draft of this spec.
+**Decision, owner-directed 2026-07-30: this project does not enable AWS Organizations centralized root access management, and does not delete any root credentials.** Root stays as break-glass. An earlier draft of this spec specified root credential removal. That was wrong for three reasons, recorded here so the decision is not re-litigated.
 
-**Part one, the control that actually locks things down.** Called once, org-wide, from the management account:
+**Reason one, blast radius.** `iam:EnableOrganizationsRootCredentialsManagement` has no OU-level or per-account scoping. It is organization-wide. RCAP `<MGMT_ACCOUNT_ID>` is a member account, so enabling it would have reached RCAP, contradicting this spec's own constraint that RCAP is not modified. A control that cannot be scoped to the Sandbox OU has no place in a design whose blast-radius boundary is the Sandbox OU.
 
-```
-aws iam enable-organizations-root-credentials-management
-aws iam enable-organizations-root-sessions
-aws iam list-organizations-features          # idempotency check
-```
+**Reason two, the mitigation was overstated.** `sts:AssumeRoot` is scoped to exactly five AWS managed task policies: `IAMAuditRootUserCredentials`, `IAMCreateRootUserPassword`, `IAMDeleteRootUserCredentials`, `S3UnlockBucketPolicy`, `SQSUnlockQueuePolicy`. It is not general root access. Tasks that still require real root sign-in include restoring IAM user permissions after an administrator revokes their own, activating IAM access to the Billing console, configuring S3 MFA Delete, retrieving certain tax invoices, registering as a Reserved Instance Marketplace seller, and the KMS unmanageable-key support path. Trading a full break-glass for five tasks is a bad trade.
 
-Enabling root credentials management is what prevents member accounts from signing in as root or running root password recovery. It also enables Organizations trusted access for IAM automatically, so no separate `organizations enable-aws-service-access --service-principal iam.amazonaws.com` call is needed. Enabling root sessions is what makes `sts:AssumeRoot` available for break-glass.
+**Reason three, root is the break-glass.** Removing it removes the recovery path of last resort and makes account recovery depend on the organization surviving. For a project account that is a poor trade, and it is not the property this design needs.
 
-**Part two, deleting credentials that already exist.** A privileged session scoped by an AWS managed task policy:
+**What replaces it.** The standard root hardening posture, which achieves the security goal without burning the break-glass:
 
-```
-aws sts assume-root \
-  --target-principal <new-account-id> \
-  --task-policy-arn arn:aws:iam::aws:policy/root-task/IAMDeleteRootUserCredentials \
-  --duration-seconds 900 \
-  --region us-west-2
-```
+| Control | Note |
+|---|---|
+| MFA on the root user | Hardware key preferred. AWS enforces MFA for root by default but requires the operator to add the device |
+| No root access keys, ever | Verify none exist. This is the credential that actually leaks |
+| Root never used for routine work | Daily access is Identity Center. Root is opened only for a task on the list above |
+| CloudTrail plus EventBridge alarm on any root usage | Detective control. Root sign-in should page you, because it should never happen unannounced |
+| Strong unique password in a password manager | Break-glass credential, stored where you can reach it under duress |
+| Alternate contacts set to a monitored address | Section 3 |
 
-Then, using the returned session credentials against the member account: `iam delete-login-profile`, `iam delete-access-key`, `iam delete-signing-certificate`, `iam deactivate-mfa-device`. Audit first with the `IAMAuditRootUserCredentials` task policy and `iam get-login-profile`, `iam list-access-keys`, `iam list-mfa-devices`, `iam list-signing-certificates`.
+**Useful consequence of Organizations.** With all features enabled, the management account can already close member accounts and update member root email addresses, account names, contact information, alternate contacts, and enabled Regions **without root credentials**. Several things people assume require member root do not.
 
-**Four gotchas that will bite a script.**
-
-1. **`sts:AssumeRoot` does not work on the STS global endpoint.** It must go to a Regional endpoint. Pass `--region` explicitly.
-2. **Maximum session duration is 900 seconds.** Not an hour, not twelve. Fifteen minutes.
-3. **The caller needs `sts:AssumeRoot` granted explicitly, and cannot be the root user.** The Identity Center permission set must carry it.
-4. **A freshly created Organizations member account may have no root credentials to delete.** Organizations creates the account without a root password. The delete calls will return `NoSuchEntity`, which the bootstrap must treat as success, not failure. The real lockdown came from part one.
-
-Break-glass recovery uses the `IAMCreateRootUserPassword` task policy from the management account, which is why part one does not permanently strand the account so long as the organization survives.
-
-**Accepted trade-off.** This removes the ability to recover the member account independently of the organization. For a project account inside an organization you control, that is the correct trade. It would be the wrong trade for an account that must survive the loss of its management account.
+**Note on the new account's starting state.** Organizations creates member accounts with no root password. That is AWS default behavior, not something this design does. Establishing the break-glass therefore means running root password recovery once through the root email address, setting a strong password, and enrolling MFA. Section 3 covers why that makes root-address deliverability a break-glass dependency rather than a formality.
 
 ### 5.3 Budget
 
@@ -171,11 +162,12 @@ Ordered steps:
 4. `organizations create-policy` from `infra/aws/scp-sandbox-guardrails.json`, then `organizations attach-policy` to the OU.
 5. `organizations create-account`. Poll `organizations describe-create-account-status` until `SUCCEEDED`. Capture the account ID.
 6. `organizations move-account` into the `Sandbox` OU. Then `account put-alternate-contact` three times, for `BILLING`, `OPERATIONS`, and `SECURITY`, all pointing at `rock@rockcyber.com`, so operational mail reaches a known-good address independent of the root address.
-7. **Operator gate.** Confirm mail reached the root address before proceeding. This is the last point at which the root email can still be changed. See section 3.
-8. `iam enable-organizations-root-credentials-management` and `iam enable-organizations-root-sessions`, guarded by `iam list-organizations-features` for idempotency. Then audit the new account's root credentials through `sts assume-root` with the `IAMAuditRootUserCredentials` task policy, and delete any that exist with `IAMDeleteRootUserCredentials`. Treat `NoSuchEntity` as success. Section 5.2 carries the gotchas.
-9. `identitystore:CreateUser` if needed, `sso-admin:CreatePermissionSet` for both sets, `AttachManagedPolicyToPermissionSet`, `ProvisionPermissionSet`, then `CreateAccountAssignment` for Rock on `MlopsToxicAdmin`, polling `DescribeAccountAssignmentCreationStatus`.
-10. Assume `OrganizationAccountAccessRole` into the new account. Set the account alias. Create the Terraform state bucket with versioning, SSE, and public access blocked.
-11. Write `infra/aws/bootstrap-outputs.env` with the account ID, region, and state bucket name. This file is gitignored.
+7. **Operator step, break-glass setup.** Run root password recovery for the new account through its root address, set a strong password, store it in the password manager, and enroll MFA. Confirm no root access keys exist. Section 5.2 is the checklist. The script prints the instructions and waits. **It does not touch root credentials itself and never calls `iam enable-organizations-root-credentials-management`.**
+8. `identitystore:CreateUser` if needed, `sso-admin:CreatePermissionSet` for both sets, `AttachManagedPolicyToPermissionSet`, `ProvisionPermissionSet`, then `CreateAccountAssignment` for Rock on `MlopsToxicAdmin`, polling `DescribeAccountAssignmentCreationStatus`.
+9. Assume `OrganizationAccountAccessRole` into the new account. Set the account alias. Create the Terraform state bucket with versioning, SSE, and public access blocked.
+10. Write `infra/aws/bootstrap-outputs.env` with the account ID, region, and state bucket name. This file is gitignored.
+
+**Organization-wide operations are out of scope for this script.** The only org-level writes it performs are creating an OU, creating and attaching an SCP to that OU, and creating an account inside it. Every one of those is scoped to the new `Sandbox` OU. Nothing this script does changes the posture of any existing account, RCAP included. Any operation without OU-level scoping is disqualified by that rule, which is what removed centralized root access management from the design.
 
 Every operation named above was verified present in the botocore service models for `organizations`, `iam`, `sts`, `sso-admin`, and `identitystore` at version 1.43.60.
 
@@ -243,6 +235,8 @@ Secrets Manager holds the Weights & Biases API key and the reviewer shared secre
 
 Single-account CloudTrail to a dedicated S3 bucket. GuardDuty enabled. CloudWatch log groups at 14-day retention, because default retention is forever and log storage is a silent cost.
 
+**Root usage alarm.** An EventBridge rule on CloudTrail sign-in and API events where the principal is the account root, wired to the SNS topic that carries the budget alerts. This is the detective control that makes keeping the root user safe. Root should never be used unannounced, so any root activity is either you deliberately opening the break-glass or an incident. Terraform owns the rule, so it exists from the first apply.
+
 GuardDuty is the one optional recurring cost in this design, likely a few dollars a month at this account's event volume. It is the strongest detective control available for the price.
 
 ## 8. Build and deployment pipeline
@@ -305,7 +299,7 @@ Recorded honestly, including the ones that cut against maximum security.
 | No auto-stop budget action | A runaway cost is caught by alert and SCP rather than stopped automatically. Owner decision, compensated by the instance-type allowlist |
 | No NAT gateway, EC2 in public subnets | Instances have public IPs. Mitigated by an ingress allowlist, no port 22, and IMDSv2. The alternative costs roughly a third of the monthly budget |
 | Default `aws/rds` encryption key | No customer-managed key, no key policy control, no independent key rotation schedule. Correct for a public dataset, wrong for regulated data |
-| Root credentials deleted on the member account | The account cannot be recovered independently of the organization |
+| Root user preserved as break-glass, not deleted | A live root user is a standing high-value credential. Accepted deliberately, because the alternative is organization-wide, unscopable, reaches RCAP, and buys only five task policies in return. Compensated by MFA, no access keys, no routine use, and a CloudTrail alarm on any root activity. Owner decision, section 5.2 |
 | Repository public from the start | A leaked secret is exposed immediately rather than after a detection window. Mitigated by gitleaks in CI and by no secret ever entering the repository |
 | RCAP left unchanged | Two static access keys continue to exist in `<MGMT_ACCOUNT_ID>`. Documented in the audit, deliberately out of scope here |
 | Single reviewer shared secret | Unchanged from v1.0. Not a real authentication system. Acceptable for a class project, named as such in the model card |
@@ -333,7 +327,7 @@ A separate, non-modifying deliverable at `docs/rcap-iam-audit.md` covering accou
 | IAM Identity Center enabled | Not yet. Four console operations, section 4.1 |
 | Repository public | Not yet. Required by the assignment deliverable and by the free arm64 runners |
 
-Mail delivery to the root address is **not** a blocking prerequisite. It is bootstrap step 7, an operator gate placed immediately before root credentials are deleted, per section 3.
+Mail delivery to the root address is **not** a blocking prerequisite. It is bootstrap step 7, where root password recovery establishes the break-glass, per section 3. A bad address is fixable from the management account.
 
 The operator runbook with exact commands for these lives in `docs/HANDOFF.md`.
 
@@ -343,9 +337,10 @@ Claims in this spec were checked against primary sources on 2026-07-30 rather th
 
 | Claim | Source | Result |
 |---|---|---|
-| Root credential and privileged session operation names | botocore 1.43.60 service models for `iam` and `sts` | Confirmed. Names in section 5.2 |
-| `sts:AssumeRoot` task policy ARNs, regional endpoint requirement, 900s cap | botocore model plus IAM User Guide `id_root-user-privileged-task` | Confirmed |
-| Trusted access auto-enabled by root credentials management | Organizations User Guide `services-that-can-integrate-iam` | Confirmed. No separate call needed |
+| Centralized root access management can be scoped to an OU or account | IAM User Guide `id_root-enable-root-access` | **Refuted.** Organization-wide only. Would have reached RCAP. Feature removed from the design, section 5.2 |
+| `sts:AssumeRoot` substitutes for root | IAM User Guide `id_root-user` task list | **Refuted.** Five task policies only. Billing console activation, IAM permission restore, S3 MFA Delete, tax invoices, RI Marketplace, and KMS recovery all still need real root |
+| Management account can change member root email, contacts, and close accounts without root | IAM User Guide `id_root-user` | Confirmed. A bad root address is fixable, not terminal |
+| `sts:AssumeRoot` task policy ARNs, regional endpoint requirement, 900s cap | botocore model plus IAM User Guide `id_root-user-privileged-task` | Confirmed, retained as reference only since the feature is unused |
 | Identity Center org instance cannot be created by API | botocore `sso-admin:CreateInstance` documentation | Confirmed. Console-only |
 | Bootstrap automation operations all exist | botocore models for `organizations`, `sso-admin`, `identitystore` | Confirmed, all present |
 | `ec2:InstanceType` is resource-level on `RunInstances` | AWS service reference `v1/ec2/ec2.json` | Confirmed. Drove the Resource-scoping trap in 5.1 |

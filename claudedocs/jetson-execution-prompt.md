@@ -99,7 +99,15 @@ re-litigate the locked decisions.
   `iam:CreateAccessKey`.
 - **No SSH.** Deployment runs over SSM Run Command. No security group opens port 22.
 - **The RCAP account `<MGMT_ACCOUNT_ID>` is read-only in scope.** Audit it, never modify
-  it.
+  it. More broadly: every organization-level write must be scoped to the new
+  `Sandbox` OU. If an AWS feature cannot be scoped to an OU, it is disqualified,
+  because it would change the posture of accounts outside this project.
+- **Never revoke, delete, or disable a root user.** Root is break-glass and stays.
+  Do not enable AWS Organizations centralized root access management. It is
+  organization-wide with no OU scoping, and `sts:AssumeRoot` covers only five task
+  policies rather than substituting for root. Spec section 5.2 is the standing
+  decision. Harden root instead: MFA, no access keys, no routine use, CloudTrail
+  alarm on any root activity.
 - Git: a feature branch per phase (`feat/phase-N-*`), never commit to main
   directly, human author (`rocklambros <rock@rockcyber.com>`), no AI attribution
   anywhere. Solo project, no partner. **Repo is public**, so `SECURITY.md` is
