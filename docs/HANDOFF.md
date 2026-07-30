@@ -19,23 +19,50 @@ No AWS API call has been made, no account exists, no resource has been created, 
 
 Three operator actions, in this order. Everything after them is scripted.
 
-## 1. Install tooling on the Jetson
+## 1. Install tooling
 
-Both are missing on the Mac and need checking on the Jetson. Versions are pinned deliberately.
+Both are missing on the Mac and need checking on the Jetson. Versions are pinned deliberately. Do this on whichever machine will run the bootstrap. Doing it on both is fine and costs nothing.
+
+### On the Jetson (aarch64 Linux)
 
 ```bash
-# AWS CLI v2 for aarch64 Linux. v1 predates every root-credential
-# operation this project needs.
+# AWS CLI v2. v1 predates every root-credential and SSO operation this
+# project needs. --update is safe whether or not a v2 already exists.
 curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o /tmp/awscliv2.zip
-unzip -q /tmp/awscliv2.zip -d /tmp && sudo /tmp/aws/install --update
-aws --version        # expect aws-cli/2.x, not 1.x
+unzip -q -o /tmp/awscliv2.zip -d /tmp
+sudo /tmp/aws/install --update
+aws --version                       # must print aws-cli/2.x
 
-# Terraform 1.15.8 linux_arm64. Anything below 1.11 lacks GA S3 native
-# state locking, which this design depends on.
+# Terraform 1.15.8. Anything below 1.11 lacks GA S3 native state locking,
+# which this design depends on.
 curl -fsSL https://releases.hashicorp.com/terraform/1.15.8/terraform_1.15.8_linux_arm64.zip -o /tmp/tf.zip
-unzip -q /tmp/tf.zip -d /tmp && sudo install -m 755 /tmp/terraform /usr/local/bin/terraform
-terraform version    # expect v1.15.8
+unzip -q -o /tmp/tf.zip -d /tmp
+sudo install -m 755 /tmp/terraform /usr/local/bin/terraform
+terraform version                   # must print v1.15.8
 ```
+
+### On the Mac (Apple silicon)
+
+```bash
+# AWS CLI v2. Installs to /usr/local/bin/aws.
+curl -fsSL "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o /tmp/AWSCLIV2.pkg
+sudo installer -pkg /tmp/AWSCLIV2.pkg -target /
+
+# Terraform 1.15.8 darwin_arm64.
+curl -fsSL https://releases.hashicorp.com/terraform/1.15.8/terraform_1.15.8_darwin_arm64.zip -o /tmp/tf.zip
+unzip -q -o /tmp/tf.zip -d /tmp
+sudo install -m 755 /tmp/terraform /usr/local/bin/terraform
+```
+
+**PATH conflict on the Mac.** A pip-installed AWS CLI **v1** currently sits at `/Library/Frameworks/Python.framework/Versions/3.12/bin/aws` and will shadow the new v2 if that directory comes first on `PATH`. Check and fix:
+
+```bash
+which -a aws                        # v2 at /usr/local/bin/aws must be first
+aws --version                       # must print aws-cli/2.x, not 1.35.0
+pip uninstall awscli                # cleanest fix, removes the v1 shadow
+```
+
+Do not proceed while `aws --version` reports 1.x. Every root-credential and SSO command in this project will fail in confusing ways.
 
 ## 2. Make the repository public
 
@@ -50,23 +77,100 @@ Required by the assignment deliverable, and it unlocks free unlimited `ubuntu-24
 
 ## 3. Enable IAM Identity Center in the management account
 
-Console, four operations, one time. This is the only manual surface in the entire project. It exists because `sso-admin:CreateInstance` rejects creation inside an organization management account, so there is no API path.
+Console, one time. This is the only manual surface in the entire project. It exists because `sso-admin:CreateInstance` rejects creation inside an organization management account, so there is no API path.
 
-Sign in to the management account (`rock@rockcyber.com`), then:
+Sign in to the **management account** at `rock@rockcyber.com`. Note that the management account ID is not `<MGMT_ACCOUNT_ID>`. That one is RCAP, a member account. The bootstrap script records the management account ID on its first run.
 
-1. Open IAM Identity Center. Set the region selector to **`us-west-2`** before enabling, because the home region is fixed at creation. Choose **Enable**.
-2. **Users**, then **Add user**. Create your user. Turn on MFA when prompted.
-3. **Permission sets**, then **Create permission set**. Predefined, `AdministratorAccess`.
-4. **AWS accounts**, select the **management account**, **Assign users or groups**, pick your user and that permission set.
+Every value below is literal. Type it exactly. Anything not listed, leave at its default or blank.
 
-Then wire the CLI on the Jetson:
+### 3a. Enable the instance
+
+1. Go to `https://console.aws.amazon.com/singlesignon/`
+2. **Set the Region selector in the top right to `US West (Oregon) us-west-2` before you click anything else.** The home Region is fixed at creation and cannot be moved afterward.
+3. Click **Enable**. If offered a choice between an organization instance and an account instance, choose the **organization** one.
+4. On the dashboard, copy the **AWS access portal URL**. It looks like `https://d-XXXXXXXXXX.awsapps.com/start`. You need it in step 3e. Paste it somewhere now.
+
+### 3b. Create the user
+
+Left nav **Users**, then **Add user**.
+
+| Field | Value |
+|---|---|
+| Username | `rock.lambros` |
+| Password | Select **Send an email to this user with password setup instructions** |
+| Email address | `rock@rockcyber.com` |
+| Confirm email address | `rock@rockcyber.com` |
+| First name | `Rock` |
+| Last name | `Lambros` |
+| Display name | `Rock Lambros` |
+| Everything else | Leave blank |
+
+`rock.lambros` matches the admin username already used in the RCAP account, so the convention stays consistent across the org. Change it if you prefer, and if you do, use the same value in step 3d.
+
+Click **Next**. On **Add user to groups**, add nothing and click **Next**. On the review screen click **Add user**.
+
+Then open `rock@rockcyber.com`, click **Accept invitation** in the mail, set a password, and **enroll MFA when prompted**. MFA enrollment happens here, at first sign-in to the access portal, not in the Add user wizard.
+
+### 3c. Create the permission set
+
+Left nav **Permission sets**, then **Create permission set**.
+
+| Field | Value |
+|---|---|
+| Permission set type | **Predefined permission set** |
+| Policy for predefined permission set | `AdministratorAccess` |
+| Permission set name | `AdministratorAccess` (leave the prefilled value) |
+| Description | `Org bootstrap admin` |
+| Session duration | `4 hours` |
+| Relay state | Leave blank |
+| Tags | Skip |
+
+Four hours rather than the one-hour default so a long `terraform apply` does not expire mid-run. Twelve is available and is more standing privilege than this needs.
+
+Click **Next**, then **Create**.
+
+### 3d. Assign the user to the management account
+
+Left nav **AWS accounts**. You will see the organization tree.
+
+1. Tick the checkbox next to the **management account**, which is the account at the root of the tree. Do **not** select `<MGMT_ACCOUNT_ID>`, which is RCAP.
+2. Click **Assign users or groups**.
+3. **Users** tab, select `rock.lambros`, click **Next**.
+4. Select the `AdministratorAccess` permission set, click **Next**.
+5. Click **Submit**.
+6. Wait until the status shows **Provisioned**. It takes under a minute.
+
+### 3e. Wire the CLI on the Jetson
+
+Run `aws configure sso` and answer exactly this:
+
+| Prompt | Answer |
+|---|---|
+| `SSO session name` | `rockcyber` |
+| `SSO start URL` | the portal URL you copied in step 3a |
+| `SSO region` | `us-west-2` |
+| `SSO registration scopes` | press Enter to accept `sso:account:access` |
+
+A browser opens. Approve the request. Then:
+
+| Prompt | Answer |
+|---|---|
+| account selection | the **management account**, not `<MGMT_ACCOUNT_ID>` |
+| `CLI default client Region` | `us-west-2` |
+| `CLI default output format` | `json` |
+| `CLI profile name` | `rc-mgmt` |
+
+Verify:
 
 ```bash
-aws configure sso          # start URL is on the Identity Center dashboard
-aws sts get-caller-identity   # must return an ARN in the management account
+aws sts get-caller-identity --profile rc-mgmt
 ```
 
-That last command succeeding is the gate. Once it does, the bootstrap script can do everything else.
+It must return an ARN of the form `arn:aws:sts::<management-account-id>:assumed-role/AWSReservedSSO_AdministratorAccess_.../rock.lambros`. **That command succeeding is the gate.** Once it does, the bootstrap script can do everything else.
+
+Re-authenticate any time with `aws sso login --profile rc-mgmt`.
+
+Console click-paths above are written against the current console. AWS moves labels around. The **values** in the tables are the part that matters and are fixed by this design. If a label has moved, match on the value.
 
 ---
 
