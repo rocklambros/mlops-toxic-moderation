@@ -83,16 +83,19 @@ terraform version    # must print v1.15.8
 
 Do not proceed anywhere while `aws --version` reports 1.x. Every SSO command in this project fails in confusing ways under v1.
 
-## 2. Make the repository public
+## 2. Make the repository public: COMPLETE
 
-One-way door for git history. The history was scanned clean before this was recommended: nine files, all documentation, no secret patterns.
+Flipped 2026-07-30. `visibility: PUBLIC`, `isPrivate: false`.
 
-```bash
-gh repo edit rocklambros/mlops-toxic-moderation \
-  --visibility public --accept-visibility-change-consequences
-```
+Pre-flight before the flip, in this order:
+
+1. The account ID was scrubbed from all 8 branch commits with `git filter-branch`, rewriting both file contents and commit messages, then force-pushed **while the repo was still private**. That sequencing is what closed the exposure window rather than merely hiding it.
+2. `gitleaks detect` over the full history: 13 commits scanned, **no leaks found**.
+3. Confirmed the nine tracked files are all documentation, and that `docs/account-ids.local.md` is untracked and ignored.
 
 Required by the assignment deliverable, and it unlocks free unlimited `ubuntu-24.04-arm` runners so CI builds Graviton images natively.
+
+**Now-open compliance gap.** QC.1 requires a vulnerability disclosure policy for public projects. `SECURITY.md` is scheduled as Phase A task 9 and does not exist yet, so the repository is publicly visible without one. Close it early in Phase A.
 
 ## 3. Enable IAM Identity Center in the management account
 

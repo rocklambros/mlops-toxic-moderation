@@ -22,7 +22,7 @@ This spec covers the account and everything under it. It does not change the app
 | Local credentials | IAM users `rc-script-user` and `llm-safety-study-admin`, both in `<MGMT_ACCOUNT_ID>`, both static keys |
 | Management account CLI access | None |
 | IAM Identity Center | Not enabled |
-| Repository | `rocklambros/mlops-toxic-moderation`, private, flipping to public |
+| Repository | `rocklambros/mlops-toxic-moderation`, **public as of 2026-07-30**. History scrubbed of identifiers and gitleaks-clean before the flip |
 | Region | `us-west-2` (changed from `us-west-1`) |
 
 The absence of management-account credentials is the constraint that shapes the bootstrap. The correct fix is not a new static key. It is IAM Identity Center.
@@ -333,7 +333,7 @@ A separate, non-modifying deliverable at `docs/rcap-iam-audit.md` covering accou
 | Terraform 1.11+ | **Missing.** 1.5.7 installed. Required for GA S3 native state locking |
 | `gh` CLI authenticated | Present, v2.92.0 |
 | IAM Identity Center enabled | Not yet. Four console operations, section 4.1 |
-| Repository public | Not yet. Required by the assignment deliverable and by the free arm64 runners |
+| Repository public | Done 2026-07-30 |
 
 Mail delivery to the root address is **not** a blocking prerequisite. It is bootstrap step 7, where root password recovery establishes the break-glass, per section 3. A bad address is fixable from the management account.
 
