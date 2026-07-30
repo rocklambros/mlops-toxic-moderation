@@ -9,9 +9,11 @@ Where the project stands, and exactly what to do next. Update this file whenever
 
 ## Current stage
 
-**Design complete. Nothing has been executed against AWS.**
+**Stage B in progress. IAM Identity Center is live and the permission set is provisioned.**
 
-No AWS API call has been made, no account exists, no resource has been created, no credential has been issued. The repository is the only artifact.
+Done as of 2026-07-30: Mac toolchain installed and verified, repository public with `SECURITY.md` and GitHub security controls enabled, IAM Identity Center enabled in `us-west-2`, user `rock.lambros` created, `AdministratorAccess` permission set created and **provisioned** to the management account.
+
+Not done: `aws configure sso` on an operator machine (step 3e), the Jetson toolchain, and every AWS resource. **No member account exists yet, no bootstrap has run, and no Terraform has been applied.**
 
 ---
 
@@ -98,6 +100,8 @@ Required by the assignment deliverable, and it unlocks free unlimited `ubuntu-24
 **QC.1 gap closed 2026-07-30.** `SECURITY.md` is written and committed, GitHub private vulnerability reporting is enabled, and secret scanning with push protection is on. Phase A task 9 is therefore done ahead of schedule and only needs a review pass.
 
 ## 3. Enable IAM Identity Center in the management account
+
+**Steps 3a through 3d are COMPLETE as of 2026-07-30.** Instance enabled in `us-west-2`, user `rock.lambros` created, `AdministratorAccess` permission set created, assignment to the management account shows **Provisioned**. Step 3e (`aws configure sso`) is the remaining piece and must be run on each machine that will operate the account. The steps below are retained as the reproduction record.
 
 Console, one time. This is the only manual surface in the entire project. It exists because `sso-admin:CreateInstance` rejects creation inside an organization management account, so there is no API path.
 
