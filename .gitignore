@@ -17,6 +17,12 @@ secrets/
 *.pem
 *.key
 
+# Account, organization, and instance identifiers. Not credentials, but the repo
+# is public and these aid targeting and enumeration. Committed docs use
+# placeholders and resolve them from these files.
+*.local.md
+infra/aws/bootstrap-outputs.env
+
 # Data (raw Jigsaw dataset and derived splits are not versioned in git)
 data/
 *.csv

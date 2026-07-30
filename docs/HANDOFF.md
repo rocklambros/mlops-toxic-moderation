@@ -98,7 +98,9 @@ Required by the assignment deliverable, and it unlocks free unlimited `ubuntu-24
 
 Console, one time. This is the only manual surface in the entire project. It exists because `sso-admin:CreateInstance` rejects creation inside an organization management account, so there is no API path.
 
-Sign in to the **management account** at `rock@rockcyber.com`. Note that the management account ID is not `<MGMT_ACCOUNT_ID>`. That one is RCAP, a member account. The bootstrap script records the management account ID on its first run.
+Sign in to the **management account** at `rock@rockcyber.com`.
+
+**Correction, 2026-07-30.** An earlier version of this file said the management account was some account other than the one RCAP runs in. That was wrong. The organization currently contains exactly one account, named `RockCyber`, and it **is** the management account. RCAP's workloads run inside it. The new mlops account will be the organization's first true member account. Concrete IDs are in the gitignored `docs/account-ids.local.md`.
 
 Every value below is literal. Type it exactly. Anything not listed, leave at its default or blank.
 
@@ -152,7 +154,7 @@ Click **Next**, then **Create**.
 
 Left nav **AWS accounts**. You will see the organization tree.
 
-1. Tick the checkbox next to the **management account**, which is the account at the root of the tree. Do **not** select `<MGMT_ACCOUNT_ID>`, which is RCAP.
+1. Tick the checkbox next to **`RockCyber`**, the single account shown under `Root`. That is the management account. Right now it is the only account in the organization, so there is nothing else to pick.
 2. Click **Assign users or groups**.
 3. **Users** tab, select `rock.lambros`, click **Next**.
 4. Select the `AdministratorAccess` permission set, click **Next**.
@@ -174,7 +176,7 @@ A browser opens. Approve the request. Then:
 
 | Prompt | Answer |
 |---|---|
-| account selection | the **management account**, not `<MGMT_ACCOUNT_ID>` |
+| account selection | `RockCyber`, the management account. It is the only choice today |
 | `CLI default client Region` | `us-west-2` |
 | `CLI default output format` | `json` |
 | `CLI profile name` | `rc-mgmt` |
@@ -197,7 +199,7 @@ Console click-paths above are written against the current console. AWS moves lab
 
 **Nothing in this project deletes, disables, or revokes a root user.** AWS Organizations centralized root access management is deliberately not enabled. Two reasons, both verified:
 
-1. **It has no OU or per-account scoping.** It is organization-wide, so it would reach RCAP `<MGMT_ACCOUNT_ID>` and change that account's root recovery posture. This project's blast-radius boundary is the `Sandbox` OU, and anything that cannot be scoped to it is disqualified.
+1. **It has no OU or per-account scoping.** It is organization-wide, so it binds every current and future member account rather than just this project's. This project's blast-radius boundary is the `Sandbox` OU, and anything that cannot be scoped to it is disqualified. Note that an earlier version of this file claimed it would reach RCAP. That was wrong: RCAP runs in the management account, and the feature applies to member accounts only. Reason 2 is the load-bearing one.
 2. **`sts:AssumeRoot` is not a substitute for root.** It covers exactly five managed task policies. Restoring IAM user permissions after an admin lockout, activating IAM access to the Billing console, S3 MFA Delete, certain tax invoices, RI Marketplace seller registration, and the KMS unmanageable-key path all still require real root sign-in.
 
 Root is hardened instead: MFA enrolled, no access keys, never used for routine work, strong password in a password manager, and a CloudTrail plus EventBridge alarm that fires on any root activity.

@@ -63,7 +63,8 @@ re-litigate the locked decisions.
   is wrong. Stop and say so.
 - Runtime target is a dedicated AWS Organizations member account
   `rockcyber-mlops-toxic` in region **us-west-2**. It is not the AWS Academy lab
-  and not the RCAP account `<MGMT_ACCOUNT_ID>`.
+  and not the existing RockCyber account, which is the organization management
+  account and runs RCAP. Real IDs are in the gitignored `docs/account-ids.local.md`.
 - Confirm credentials before the phases that need them: `wandb login` state,
   `RUNPOD_API_KEY` in the environment, and `aws sts get-caller-identity` returning
   an identity in the mlops account. Phase 0 needs none of these and runs fully
@@ -98,8 +99,8 @@ re-litigate the locked decisions.
   EC2 uses instance profiles. Enforced by an SCP that denies `iam:CreateUser` and
   `iam:CreateAccessKey`.
 - **No SSH.** Deployment runs over SSM Run Command. No security group opens port 22.
-- **The RCAP account `<MGMT_ACCOUNT_ID>` is read-only in scope.** Audit it, never modify
-  it. More broadly: every organization-level write must be scoped to the new
+- **The existing RockCyber account is read-only in scope.** It is the organization
+  management account and runs RCAP. Audit it, never modify it. More broadly: every organization-level write must be scoped to the new
   `Sandbox` OU. If an AWS feature cannot be scoped to an OU, it is disqualified,
   because it would change the posture of accounts outside this project.
 - **Never revoke, delete, or disable a root user.** Root is break-glass and stays.

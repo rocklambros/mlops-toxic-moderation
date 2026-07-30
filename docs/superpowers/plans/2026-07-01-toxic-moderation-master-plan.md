@@ -217,7 +217,7 @@ Each phase produces a working, testable increment and lands on its own feature b
 5. `.github/workflows/deploy.yml`: build four arm64 images on `ubuntu-24.04-arm`, tag by git SHA, push to ECR, `terraform apply`, roll containers through SSM Run Command. Gated by the `production` environment with required review.
 6. Seed Secrets Manager by CLI with the W&B API key and the reviewer shared secret. No secret value enters Terraform state or the repository.
 7. `Makefile` targets `aws-up` and `aws-down` that start and stop EC2 and RDS between sessions. Document that a stopped RDS instance restarts automatically after seven days.
-8. `docs/rcap-iam-audit.md`: read-only audit of account `<MGMT_ACCOUNT_ID>`. Access key age, attached policy breadth, MFA state, root credential state, public S3, CloudTrail coverage. **Read-only API calls only, no writes to that account.**
+8. `docs/rcap-iam-audit.md`: read-only audit of account `<MGMT_ACCOUNT_ID>`, which is the organization **management** account and also runs RCAP. Access key age, attached policy breadth, MFA state, root credential state, public S3, CloudTrail coverage, and the fact that a production workload sits in the management account where SCPs cannot constrain it. **Read-only API calls only, no writes to that account.**
 9. `SECURITY.md`: VDP and coordinated disclosure, mandatory now that the repository is public.
 10. `docs/HANDOFF.md`: current stage, what exists where, exact resume command.
 

@@ -17,8 +17,8 @@ This spec covers the account and everything under it. It does not change the app
 
 | Fact | Value |
 |---|---|
-| AWS Organization | Exists. Management account under `rock@rockcyber.com` |
-| Existing member account | `<MGMT_ACCOUNT_ID>` (RCAP), out of scope for changes |
+| AWS Organization | Exists, `<ORG_ID>`, root `<ROOT_ID>` |
+| Accounts in the organization | Exactly one: `<MGMT_ACCOUNT_ID>`, name `RockCyber`, root email `rock@rockcyber.com`. **It is the management account, and RCAP's workloads run inside it.** Corrected 2026-07-30 after inspecting the console. An earlier draft called it a member account |
 | Local credentials | IAM users `rc-script-user` and `llm-safety-study-admin`, both in `<MGMT_ACCOUNT_ID>`, both static keys |
 | Management account CLI access | None |
 | IAM Identity Center | Not enabled |
@@ -30,13 +30,19 @@ The absence of management-account credentials is the constraint that shapes the 
 ## 3. Account and organization topology
 
 ```
-Organization root (management account, rock@rockcyber.com)
-  |
-  +-- (existing OU / root)          <MGMT_ACCOUNT_ID>  RCAP        [untouched]
-  |
-  +-- Sandbox OU                    <new>         mlops-toxic [this project]
-        SCP: sandbox-guardrails
+Organization <ORG_ID>
+  Root <ROOT_ID>
+    |
+    +-- RockCyber  <MGMT_ACCOUNT_ID>  rock@rockcyber.com
+    |     MANAGEMENT account. Runs RCAP. SCPs cannot apply here.  [untouched]
+    |
+    +-- Sandbox OU                    SCP: sandbox-guardrails
+          +-- rockcyber-mlops-toxic   <new>   [this project]
 ```
+
+**RCAP is structurally immune to the guardrails, not merely excluded from them.** AWS Organizations documentation is explicit: "SCPs don't affect users or roles in the management account. They affect only the member accounts in your organization." Because RCAP runs in the management account, no SCP this project creates can reach it, even by misattachment. That is a stronger isolation guarantee than the original design assumed, and it is why the `Sandbox` OU carries no risk to existing workloads.
+
+**Noted for the audit, not for this project to fix.** Running a production workload in the organization management account is an AWS anti-pattern. That account cannot be constrained by SCPs, holds organization-wide authority, and is the billing root. This becomes a finding in `docs/rcap-iam-audit.md`.
 
 The new member account:
 
@@ -47,7 +53,7 @@ The new member account:
 | Account alias | `rockcyber-mlops-toxic` |
 | Created by | `organizations:CreateAccount` from the management account |
 | Cross-account role | `OrganizationAccountAccessRole` (created automatically) |
-| Root credentials | Deleted after creation, per section 5 |
+| Root user | Preserved as break-glass and hardened, never deleted, per section 5.2 |
 
 Creating the account through Organizations is what makes root access keys unnecessary. The management account can assume `OrganizationAccountAccessRole` into the new account from the moment it exists, so no phase of this project ever handles a root credential. This is the single largest security improvement over the RCAP bootstrap, which required temporary root access keys.
 
@@ -125,7 +131,9 @@ The EC2 instance-type allowlist is the compensating control for declining an aut
 
 **Decision, owner-directed 2026-07-30: this project does not enable AWS Organizations centralized root access management, and does not delete any root credentials.** Root stays as break-glass. An earlier draft of this spec specified root credential removal. That was wrong for three reasons, recorded here so the decision is not re-litigated.
 
-**Reason one, blast radius.** `iam:EnableOrganizationsRootCredentialsManagement` has no OU-level or per-account scoping. It is organization-wide. RCAP `<MGMT_ACCOUNT_ID>` is a member account, so enabling it would have reached RCAP, contradicting this spec's own constraint that RCAP is not modified. A control that cannot be scoped to the Sandbox OU has no place in a design whose blast-radius boundary is the Sandbox OU.
+**Reason one, unscopable blast radius. Corrected 2026-07-30, and it is weaker than first written.** `iam:EnableOrganizationsRootCredentialsManagement` has no OU-level or per-account scoping. It is organization-wide. The first version of this reason claimed that enabling it would reach RCAP. **That was wrong.** RCAP runs in the management account, and the feature applies to member accounts only, so RCAP would not have been affected. The valid residue of the argument is narrower: the feature still cannot be scoped to the `Sandbox` OU, so it would bind every current and future member account rather than just this project's. That conflicts with the blast-radius rule in section 6, though less dramatically than originally stated.
+
+Reasons two and three below are the load-bearing ones. This reason alone would not have justified the reversal.
 
 **Reason two, the mitigation was overstated.** `sts:AssumeRoot` is scoped to exactly five AWS managed task policies: `IAMAuditRootUserCredentials`, `IAMCreateRootUserPassword`, `IAMDeleteRootUserCredentials`, `S3UnlockBucketPolicy`, `SQSUnlockQueuePolicy`. It is not general root access. Tasks that still require real root sign-in include restoring IAM user permissions after an administrator revokes their own, activating IAM access to the Billing console, configuring S3 MFA Delete, retrieving certain tax invoices, registering as a Reserved Instance Marketplace seller, and the KMS unmanageable-key support path. Trading a full break-glass for five tasks is a bad trade.
 
@@ -306,7 +314,7 @@ Recorded honestly, including the ones that cut against maximum security.
 
 ## 12. Read-only RCAP audit
 
-A separate, non-modifying deliverable at `docs/rcap-iam-audit.md` covering account `<MGMT_ACCOUNT_ID>`: access key age on `rc-script-user` and `llm-safety-study-admin`, attached policy breadth, MFA state on IAM users and root, root credential state, public S3 exposure, and CloudTrail coverage. Read-only API calls only. Its purpose is to let the Identity Center migration be decided on evidence, later, as separate work.
+A separate, non-modifying deliverable at `docs/rcap-iam-audit.md` covering account `<MGMT_ACCOUNT_ID>`, which is the organization **management** account and also runs RCAP: access key age on `rc-script-user` and `llm-safety-study-admin`, attached policy breadth, MFA state on IAM users and root, root credential state, public S3 exposure, CloudTrail coverage, and the structural finding that a production workload runs in an account SCPs cannot constrain. Read-only API calls only. Its purpose is to let the Identity Center migration be decided on evidence, later, as separate work.
 
 ## 13. Changes required in existing documents
 

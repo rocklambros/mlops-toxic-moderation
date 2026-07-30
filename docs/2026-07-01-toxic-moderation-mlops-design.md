@@ -57,7 +57,7 @@ Weights & Biases is a deploy-time source, not a runtime dependency. At deploy, e
 
 Full design in `docs/superpowers/specs/2026-07-30-aws-account-foundation-design.md`. The load-bearing decisions:
 
-**Dedicated member account.** `rockcyber-mlops-toxic` is created by `organizations:CreateAccount` from the `rock@rockcyber.com` management account, inside a new `Sandbox` OU. Organizations creates `OrganizationAccountAccessRole` automatically, which is why no routine phase of this project ever handles a root credential. The existing RCAP account `<MGMT_ACCOUNT_ID>` is not modified, and every org-level write is scoped to the new OU.
+**Dedicated member account.** `rockcyber-mlops-toxic` is created by `organizations:CreateAccount` from the `rock@rockcyber.com` management account, inside a new `Sandbox` OU. Organizations creates `OrganizationAccountAccessRole` automatically, which is why no routine phase of this project ever handles a root credential. The existing RCAP workloads run in the organization **management** account, and SCPs never apply to a management account, so RCAP is structurally immune to these guardrails rather than merely excluded. Every org-level write is scoped to the new OU.
 
 **Root stays as break-glass.** The account root user is hardened, not removed: MFA enrolled, no access keys, never used for routine work, strong password in a password manager, and a CloudTrail plus EventBridge alarm on any root activity. AWS Organizations centralized root access management is deliberately **not** enabled, because it has no OU-level scoping and would reach RCAP, and because `sts:AssumeRoot` covers only five task policies rather than substituting for root. Full reasoning in spec section 5.2.
 
