@@ -218,7 +218,7 @@ Each phase produces a working, testable increment and lands on its own feature b
 6. Seed Secrets Manager by CLI with the W&B API key and the reviewer shared secret. No secret value enters Terraform state or the repository.
 7. `Makefile` targets `aws-up` and `aws-down` that start and stop EC2 and RDS between sessions. Document that a stopped RDS instance restarts automatically after seven days.
 8. `docs/rcap-iam-audit.md`: read-only audit of account `<MGMT_ACCOUNT_ID>`, which is the organization **management** account and also runs RCAP. Access key age, attached policy breadth, MFA state, root credential state, public S3, CloudTrail coverage, and the fact that a production workload sits in the management account where SCPs cannot constrain it. **Read-only API calls only, no writes to that account.**
-9. `SECURITY.md`: VDP and coordinated disclosure, mandatory now that the repository is public.
+9. `SECURITY.md`: **done 2026-07-30**, ahead of Phase A. Review only. GitHub private vulnerability reporting, secret scanning, and push protection are enabled on the repository.
 10. `docs/HANDOFF.md`: current stage, what exists where, exact resume command.
 
 **Test strategy:** Re-run `bootstrap.sh` and confirm it is a no-op. Run `terraform plan` and confirm no drift after apply. Confirm the SCP actually denies by attempting a denied action (a `t3.large` launch or an `iam:CreateAccessKey` call) and observing the denial. Confirm `gha-ci` cannot assume deploy permissions. Confirm no security group allows port 22. Confirm `terraform destroy` cleanly removes everything.

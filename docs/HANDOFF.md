@@ -95,7 +95,7 @@ Pre-flight before the flip, in this order:
 
 Required by the assignment deliverable, and it unlocks free unlimited `ubuntu-24.04-arm` runners so CI builds Graviton images natively.
 
-**Now-open compliance gap.** QC.1 requires a vulnerability disclosure policy for public projects. `SECURITY.md` is scheduled as Phase A task 9 and does not exist yet, so the repository is publicly visible without one. Close it early in Phase A.
+**QC.1 gap closed 2026-07-30.** `SECURITY.md` is written and committed, GitHub private vulnerability reporting is enabled, and secret scanning with push protection is on. Phase A task 9 is therefore done ahead of schedule and only needs a review pass.
 
 ## 3. Enable IAM Identity Center in the management account
 
