@@ -21,7 +21,7 @@ Three operator actions, in this order. Everything after them is scripted.
 
 ## 1. Install tooling
 
-Both are missing on the Mac and need checking on the Jetson. Versions are pinned deliberately. Do this on whichever machine will run the bootstrap. Doing it on both is fine and costs nothing.
+**Mac: done, 2026-07-30. Jetson: still to do.** Versions are pinned deliberately. Do this on whichever machine will run the bootstrap. Doing it on both is fine and costs nothing.
 
 ### On the Jetson (aarch64 Linux)
 
@@ -41,28 +41,47 @@ sudo install -m 755 /tmp/terraform /usr/local/bin/terraform
 terraform version                   # must print v1.15.8
 ```
 
-### On the Mac (Apple silicon)
+### On the Mac (Apple silicon): COMPLETE
+
+Installed 2026-07-30. Verified state:
+
+| Tool | Version | Path | Notes |
+|---|---|---|---|
+| AWS CLI | `2.36.12` | `~/bin/aws` to `~/aws-cli/aws` | User-local install, no `sudo` |
+| Terraform | `1.15.8` | `~/bin/terraform` | Direct binary, no `sudo` |
+
+**How the PATH conflict was solved without removing anything.** A pip-installed AWS CLI **v1** sits at `/Library/Frameworks/Python.framework/Versions/3.12/bin/aws` (PATH position 10), and Homebrew holds Terraform 1.5.7 at `/opt/homebrew/bin/terraform` (position 8). Homebrew's terraform formula is frozen at 1.5.7 because of the license change, so `brew upgrade` cannot reach 1.11 or later.
+
+Rather than uninstalling either, both new binaries went into `~/bin`, which is **PATH position 4** and therefore wins. The old copies remain in place and still work when called by absolute path.
+
+Integrity checks performed before installing:
+
+- Terraform zip SHA-256 matched the published `terraform_1.15.8_SHA256SUMS`.
+- The AWS CLI package passed `pkgutil --check-signature`: signed by `Developer ID Installer: AMZN Mobile LLC (94KV3E626L)` and notarized by Apple.
+
+Acceptance tests passed: all ten AWS subcommands this project needs are present (`sso login`, `configure sso`, `organizations create-account`, `organizations describe-create-account-status`, `account put-alternate-contact`, `sts assume-root`, `iam list-organizations-features`, `sso-admin create-permission-set`, `identitystore create-user`, `ssm send-command`), the four existing profiles still resolve, and a backend block with `use_lockfile = true` under `required_version = ">= 1.11"` initializes and validates.
+
+To reproduce on another Mac:
 
 ```bash
-# AWS CLI v2. Installs to /usr/local/bin/aws.
-curl -fsSL "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o /tmp/AWSCLIV2.pkg
-sudo installer -pkg /tmp/AWSCLIV2.pkg -target /
+# Terraform 1.15.8, checksum-verified, into ~/bin
+curl -fsSL -O https://releases.hashicorp.com/terraform/1.15.8/terraform_1.15.8_darwin_arm64.zip
+curl -fsSL -O https://releases.hashicorp.com/terraform/1.15.8/terraform_1.15.8_SHA256SUMS
+grep darwin_arm64 terraform_1.15.8_SHA256SUMS | shasum -a 256 -c -   # must print OK
+unzip -q -o terraform_1.15.8_darwin_arm64.zip && install -m 755 terraform ~/bin/terraform
 
-# Terraform 1.15.8 darwin_arm64.
-curl -fsSL https://releases.hashicorp.com/terraform/1.15.8/terraform_1.15.8_darwin_arm64.zip -o /tmp/tf.zip
-unzip -q -o /tmp/tf.zip -d /tmp
-sudo install -m 755 /tmp/terraform /usr/local/bin/terraform
+# AWS CLI v2 pinned, signature-verified, user-local install
+curl -fsSL -o AWSCLIV2-2.36.12.pkg https://awscli.amazonaws.com/AWSCLIV2-2.36.12.pkg
+pkgutil --check-signature AWSCLIV2-2.36.12.pkg                        # AMZN Mobile LLC, notarized
+printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><array><dict><key>choiceAttribute</key><string>customLocation</string><key>attributeSetting</key><string>%s</string><key>choiceIdentifier</key><string>default</string></dict></array></plist>\n' "$HOME" > choices.xml
+installer -pkg AWSCLIV2-2.36.12.pkg -target CurrentUserHomeDirectory -applyChoiceChangesXML choices.xml
+ln -sf ~/aws-cli/aws ~/bin/aws && ln -sf ~/aws-cli/aws_completer ~/bin/aws_completer
+
+aws --version        # must print aws-cli/2.x, not 1.35.0
+terraform version    # must print v1.15.8
 ```
 
-**PATH conflict on the Mac.** A pip-installed AWS CLI **v1** currently sits at `/Library/Frameworks/Python.framework/Versions/3.12/bin/aws` and will shadow the new v2 if that directory comes first on `PATH`. Check and fix:
-
-```bash
-which -a aws                        # v2 at /usr/local/bin/aws must be first
-aws --version                       # must print aws-cli/2.x, not 1.35.0
-pip uninstall awscli                # cleanest fix, removes the v1 shadow
-```
-
-Do not proceed while `aws --version` reports 1.x. Every root-credential and SSO command in this project will fail in confusing ways.
+Do not proceed anywhere while `aws --version` reports 1.x. Every SSO command in this project fails in confusing ways under v1.
 
 ## 2. Make the repository public
 
