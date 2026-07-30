@@ -48,8 +48,8 @@ Verify all four before running anything in Phase A.
 
 | Prerequisite | State as of 2026-07-30 | Fix |
 |---|---|---|
-| AWS CLI v2 | **Missing.** v1.35.0 installed via pip | Install v2. v1 lacks the SSO and root-credential operations this project needs |
-| Terraform 1.10+ | **Missing.** 1.5.7 installed | Upgrade. Required for S3 native state locking |
+| AWS CLI v2 | **Missing.** v1.35.0 installed via pip | Install v2. v1 predates every root-credential operation in spec section 5.2 |
+| Terraform 1.11+ | **Missing.** 1.5.7 installed | Upgrade. S3 native state locking went GA in 1.11 |
 | `gh` authenticated | Present, v2.92.0 | none |
 | Mail to `rock+aws-mlops-toxic@rockcyber.com` delivers | **Unverified** | Send a test message. `rockcyber.com` routes through Mimecast, whose recipient validation is the common cause of plus-addressed mail bouncing. Changing a root email after root credentials are deleted is painful, so confirm first |
 

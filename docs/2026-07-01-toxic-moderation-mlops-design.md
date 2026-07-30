@@ -61,7 +61,7 @@ Full design in `docs/superpowers/specs/2026-07-30-aws-account-foundation-design.
 
 **No static AWS credentials exist.** Humans authenticate through IAM Identity Center with short-lived SSO sessions. GitHub Actions authenticates through OIDC. EC2 authenticates through instance profiles. The SCP on the OU denies `iam:CreateUser` and `iam:CreateAccessKey`, which turns this from a convention into an enforced control.
 
-**The SCP is also the cost guardrail.** It denies every region except `us-west-2` and `us-east-1`, denies GPU and metal instance families, restricts `ec2:RunInstances` to a Graviton size allowlist, caps RDS at `db.t4g.small`, and blocks tampering with CloudTrail and GuardDuty. A budget alert fires at 50, 80, and 100 percent of $100 per month. There is no automated stop action, by owner decision, so the SCP carries that load.
+**The SCP is also the cost guardrail.** It denies every region except `us-west-2` and `us-east-1`, denies GPU and metal instance families, restricts `ec2:RunInstances` to a Graviton size allowlist through the resource-level `ec2:InstanceType` key, denies Aurora cluster creation, forces RDS to be private and Secrets-Manager-managed, and blocks tampering with CloudTrail and GuardDuty. A budget alert fires at 50, 80, and 100 percent of $100 per month. There is no automated stop action, by owner decision, so the SCP carries that load for compute. It cannot carry it for RDS instance class, because `rds:DatabaseClass` is not supported on `rds:CreateDBInstance`. Every condition key was verified against the AWS service reference.
 
 **Console work is four one-time operations.** Enable IAM Identity Center, create the directory user, create an `AdministratorAccess` permission set, assign it to the management account. There is no API to create an Identity Center organization instance, which makes this the irreducible manual surface. Everything after it is an API call.
 
@@ -267,8 +267,8 @@ Pull working code forward rather than starting from scratch. Monorepo root: `/Us
 Open:
 
 - EC2 sizing for the re-scorer. Confirm the instance class after measuring ONNX int8 throughput on a representative queue.
-- Centralized root access management API surface. The exact operation names were not confirmed during design and must be verified against current AWS documentation before the bootstrap implements root credential removal.
 - Ingress exposure. The security group allowlist defaults to the operator address. Opening it for a public demo window is a variable toggle, and it must be closed again afterward.
+- RDS cost guardrail. No SCP-enforceable instance-class cap exists for standalone RDS instances, verified against the AWS service reference. The budget alarm and the Terraform-pinned class are the only controls.
 
 Closed since v1.0:
 

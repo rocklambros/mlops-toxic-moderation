@@ -124,15 +124,17 @@ English six-label set matching the loader's `REQUIRED_COLUMNS`). Do not use
 
 ### First actions
 1. Read `docs/HANDOFF.md` and report the current stage back before doing anything.
-2. Check the four blocking prerequisites it lists. AWS CLI v2 and Terraform 1.10 or
-   newer were both missing as of 2026-07-30, and mail delivery to the new account's
-   root address was unverified. Report which are still unmet. Do not work around a
-   missing prerequisite.
+2. Check the four blocking prerequisites it lists. AWS CLI v2 and Terraform 1.11 or
+   newer were both missing on the Mac as of 2026-07-30, and mail delivery to the new
+   account's root address was unverified. Report which are still unmet on this
+   machine. Do not work around a missing prerequisite.
 3. If the prerequisites are met, write the Phase A detailed plan with
    `superpowers:writing-plans`, then execute it on branch
-   `feat/phase-a-aws-foundation`. **Verify the centralized root access management
-   API surface against current AWS documentation before implementing the root
-   credential removal step.** It was not confirmed during design.
+   `feat/phase-a-aws-foundation`. The AWS API surface is already verified in spec
+   section 15, so use the operations named in sections 5.2 and 6 rather than
+   researching them again. Heed the two SCP traps in section 5.1: `ec2:InstanceType`
+   must be scoped to the instance resource ARN, and `rds:DatabaseClass` does not
+   work on `CreateDBInstance`.
 4. If the prerequisites are not met, start Phase 0 instead on branch
    `feat/phase-0-data-firewall`. Its exit gate is `make test && make lint` green
    plus a reproducible `data_version` from `make data` run twice.
