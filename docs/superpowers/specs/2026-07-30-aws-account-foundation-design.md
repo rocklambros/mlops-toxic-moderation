@@ -51,7 +51,13 @@ The new member account:
 
 Creating the account through Organizations is what makes root access keys unnecessary. The management account can assume `OrganizationAccountAccessRole` into the new account from the moment it exists, so no phase of this project ever handles a root credential. This is the single largest security improvement over the RCAP bootstrap, which required temporary root access keys.
 
-**Mail delivery caveat.** `rockcyber.com` routes inbound mail through Mimecast. Mimecast recipient validation is a known cause of plus-addressed mail being rejected before it reaches the mailbox. Verify delivery to `rock+aws-mlops-toxic@rockcyber.com` with a test message **before** running the bootstrap. Changing a root email after root credentials are deleted is painful. If it bounces, use a mail alias such as `aws-mlops@rockcyber.com` pointing at `rock@rockcyber.com`, which requires no new mailbox and no new license seat.
+**Mail delivery, handled by ordering rather than a pre-flight test.** `rockcyber.com` routes inbound mail through Mimecast, whose recipient validation is a known cause of plus-addressed mail being rejected before it reaches the mailbox.
+
+The risk is narrow. Changing a member account's root email requires root sign-in, and this design deletes root credentials and blocks root password recovery. A dead address plus a locked-down root is a circular dependency.
+
+The bootstrap resolves it by sequencing rather than by asking the operator to test first. After the account is created it sets BILLING, OPERATIONS, and SECURITY alternate contacts to `rock@rockcyber.com` through `account:PutAlternateContact`, which the management account is permitted to do for a member account in the same organization. Operational mail then reaches a known-good address regardless of the root address. The bootstrap then pauses for confirmation that mail reached the root address, and only deletes root credentials afterward, at a point where the address is still changeable.
+
+A mail alias such as `aws-mlops@rockcyber.com` pointing at `rock@rockcyber.com` sidesteps the question entirely and costs no mailbox or license seat.
 
 ## 4. Identity model
 
@@ -164,11 +170,12 @@ Ordered steps:
 3. `organizations create-organizational-unit` for `Sandbox`.
 4. `organizations create-policy` from `infra/aws/scp-sandbox-guardrails.json`, then `organizations attach-policy` to the OU.
 5. `organizations create-account`. Poll `organizations describe-create-account-status` until `SUCCEEDED`. Capture the account ID.
-6. `organizations move-account` into the `Sandbox` OU.
-7. `iam enable-organizations-root-credentials-management` and `iam enable-organizations-root-sessions`, guarded by `iam list-organizations-features` for idempotency. Then audit the new account's root credentials through `sts assume-root` with the `IAMAuditRootUserCredentials` task policy, and delete any that exist with `IAMDeleteRootUserCredentials`. Treat `NoSuchEntity` as success. Section 5.2 carries the gotchas.
-8. `identitystore:CreateUser` if needed, `sso-admin:CreatePermissionSet` for both sets, `AttachManagedPolicyToPermissionSet`, `ProvisionPermissionSet`, then `CreateAccountAssignment` for Rock on `MlopsToxicAdmin`, polling `DescribeAccountAssignmentCreationStatus`.
-9. Assume `OrganizationAccountAccessRole` into the new account. Set the account alias. Create the Terraform state bucket with versioning, SSE, and public access blocked.
-10. Write `infra/aws/bootstrap-outputs.env` with the account ID, region, and state bucket name. This file is gitignored.
+6. `organizations move-account` into the `Sandbox` OU. Then `account put-alternate-contact` three times, for `BILLING`, `OPERATIONS`, and `SECURITY`, all pointing at `rock@rockcyber.com`, so operational mail reaches a known-good address independent of the root address.
+7. **Operator gate.** Confirm mail reached the root address before proceeding. This is the last point at which the root email can still be changed. See section 3.
+8. `iam enable-organizations-root-credentials-management` and `iam enable-organizations-root-sessions`, guarded by `iam list-organizations-features` for idempotency. Then audit the new account's root credentials through `sts assume-root` with the `IAMAuditRootUserCredentials` task policy, and delete any that exist with `IAMDeleteRootUserCredentials`. Treat `NoSuchEntity` as success. Section 5.2 carries the gotchas.
+9. `identitystore:CreateUser` if needed, `sso-admin:CreatePermissionSet` for both sets, `AttachManagedPolicyToPermissionSet`, `ProvisionPermissionSet`, then `CreateAccountAssignment` for Rock on `MlopsToxicAdmin`, polling `DescribeAccountAssignmentCreationStatus`.
+10. Assume `OrganizationAccountAccessRole` into the new account. Set the account alias. Create the Terraform state bucket with versioning, SSE, and public access blocked.
+11. Write `infra/aws/bootstrap-outputs.env` with the account ID, region, and state bucket name. This file is gitignored.
 
 Every operation named above was verified present in the botocore service models for `organizations`, `iam`, `sts`, `sso-admin`, and `identitystore` at version 1.43.60.
 
@@ -323,8 +330,12 @@ A separate, non-modifying deliverable at `docs/rcap-iam-audit.md` covering accou
 | AWS CLI v2 | **Missing.** v1.35.0 installed via pip. Install v2 on the operating machine. v1 predates every root-credential operation in section 5.2 |
 | Terraform 1.11+ | **Missing.** 1.5.7 installed. Required for GA S3 native state locking |
 | `gh` CLI authenticated | Present, v2.92.0 |
-| Test mail to `rock+aws-mlops-toxic@rockcyber.com` delivers | **Unverified.** Mimecast recipient validation is the risk |
 | IAM Identity Center enabled | Not yet. Four console operations, section 4.1 |
+| Repository public | Not yet. Required by the assignment deliverable and by the free arm64 runners |
+
+Mail delivery to the root address is **not** a blocking prerequisite. It is bootstrap step 7, an operator gate placed immediately before root credentials are deleted, per section 3.
+
+The operator runbook with exact commands for these lives in `docs/HANDOFF.md`.
 
 ## 15. Verification record
 

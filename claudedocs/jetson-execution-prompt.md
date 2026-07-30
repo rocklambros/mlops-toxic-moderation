@@ -1,15 +1,39 @@
 # Jetson Execution Prompt: build the toxic-moderation MLOps system
 
-How to use: on the Jetson, clone or pull this repo, check out the branch named in
-`docs/HANDOFF.md`, open Claude Code at the repo root, and paste the prompt block
-below as your first message. It orients a fresh session and starts phased
-execution. Everything it references is committed here.
+How to use: on the Jetson, clone or pull this repo, open Claude Code at the repo
+root, and paste one of the two blocks below as your first message. Everything
+they reference is committed here.
 
 Last revised 2026-07-30 for the AWS account foundation (Phase A).
 
 ---
 
-## PROMPT (paste into Claude Code on the Jetson)
+## SHORT VERSION (paste this one)
+
+Use this when the repo is already cloned on the Jetson. It points the session at
+the full prompt below, so the two never drift apart.
+
+```
+You are Claude Code on Rock's Jetson (aarch64), at the repo root of
+mlops-toxic-moderation.
+
+First: git fetch origin && git checkout feat/aws-account-foundation && git pull
+
+Then read claudedocs/jetson-execution-prompt.md and follow the FULL PROMPT
+section exactly. It carries the reading order, the locked constraints, how to
+execute, and the first actions.
+
+Before anything else, read docs/HANDOFF.md, report the current stage back to me,
+and tell me which of the "Do this next" operator actions are still outstanding on
+this machine. Do not work around a missing prerequisite.
+```
+
+---
+
+## FULL PROMPT
+
+Paste this instead of the short version if you are starting a session without the
+repo already checked out, or if you want the whole briefing inline.
 
 You are Claude Code on Rock's Jetson (aarch64 / arm64). Your job is to build the
 COMP 4450 final project in this repository, the production-grade Toxic Comment
@@ -124,10 +148,12 @@ English six-label set matching the loader's `REQUIRED_COLUMNS`). Do not use
 
 ### First actions
 1. Read `docs/HANDOFF.md` and report the current stage back before doing anything.
-2. Check the four blocking prerequisites it lists. AWS CLI v2 and Terraform 1.11 or
-   newer were both missing on the Mac as of 2026-07-30, and mail delivery to the new
-   account's root address was unverified. Report which are still unmet on this
-   machine. Do not work around a missing prerequisite.
+2. Check its "Do this next" section, which carries exact commands for the three
+   operator actions: install AWS CLI v2 and Terraform 1.15.8 on this machine, make
+   the repo public, and enable IAM Identity Center. Both tools were missing on the
+   Mac as of 2026-07-30, so verify them here rather than assuming. Report which are
+   still outstanding. Do not work around a missing prerequisite. Root-address mail
+   delivery is not a prerequisite, it is bootstrap step 7.
 3. If the prerequisites are met, write the Phase A detailed plan with
    `superpowers:writing-plans`, then execute it on branch
    `feat/phase-a-aws-foundation`. The AWS API surface is already verified in spec
