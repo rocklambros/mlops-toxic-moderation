@@ -1,13 +1,15 @@
 # Final Project Design Spec: Toxic Comment Moderation MLOps System
 
-- Version: 1.0
+- Version: 1.1
 - Owner: Rock Lambros
-- Date: 2026-07-01
+- Date: 2026-07-01, amended 2026-07-30
 - Course: COMP 4450 (MLOps), final project, 25 points, due 2026-08-18
 - Status: approved for planning
 - Target: standalone repository (not the COMP 4450 monorepo)
 
 This is the cross-cutting design that the six implementation phases hang off. It is the handoff artifact for the standalone project repo. Read it before writing the implementation plan.
+
+**v1.1 change summary (2026-07-30).** The runtime target moved from an AWS Academy lab account to a dedicated member account in the `rock@rockcyber.com` AWS Organization. Region changed from `us-west-1` to `us-west-2`. The repository becomes public, which makes `SECURITY.md` mandatory. Section 3.1 is new and carries the account, identity, and guardrail design. Sections 12, 13, 15, and 18 were revised. The full account design lives in `docs/superpowers/specs/2026-07-30-aws-account-foundation-design.md`. Nothing about the model strategy, the leakage firewall, the output contract, or the database schema changed.
 
 ## 1. Goal and grading context
 
@@ -33,17 +35,39 @@ Headline metrics: macro-F1 and per-label PR-AUC, reported with confidence interv
 The completed application has zero RunPod dependence. RunPod is a build-time GPU tool only. Once models are trained and registered, the running system never calls RunPod again.
 
 ```
-BUILD-TIME (offline, GPU)              RUNTIME (your AWS account only)
-RunPod ephemeral pods:                 EC2 #1 (API tier, kept latency-clean):
-  train_classical + sweep                FastAPI /predict /health (classical, CPU)
-  fine-tune DistilBERT                    Streamlit user + reviewer UI
-    export ONNX int8                    EC2 #2 (background tier):
-    register + digest                     monitoring dashboard
-  Weights & Biases registry              DistilBERT re-scorer worker (polls RDS)
-      | deploy-time fetch ------------>  RDS Postgres (shared state)
+BUILD-TIME (offline, GPU)         RUNTIME (AWS account rockcyber-mlops-toxic, us-west-2)
+RunPod ephemeral pods:            +---------------------------------------------------+
+  train_classical + sweep         | VPC 10.42.0.0/16                                  |
+  fine-tune DistilBERT            |  public subnet          |  private subnet         |
+    export ONNX int8              |   EC2 #1 (API tier):    |   RDS Postgres          |
+    register + digest             |     FastAPI /predict    |     (shared state)      |
+  Weights & Biases registry       |     Streamlit user+rev  |                         |
+      |                           |   EC2 #2 (background):  |   no internet path      |
+      | deploy-time fetch ------> |     monitoring dash     |                         |
+      |                           |     DistilBERT rescorer |                         |
+      |                           +---------------------------------------------------+
+GitHub Actions (arm64 runners):        ^                 ^
+  build 4 images -> ECR ---------------+                 |
+  deploy via SSM Run Command (no SSH) -------------------+
 ```
 
 Weights & Biases is a deploy-time source, not a runtime dependency. At deploy, each EC2 pulls its pinned artifact by digest, verifies SHA-256, and bakes it into the image or a local volume. The steady-state request path touches only EC2 and RDS. This satisfies both the rubric ("load from the Model Registry") and the self-contained constraint.
+
+### 3.1 AWS account, identity, and guardrails
+
+Full design in `docs/superpowers/specs/2026-07-30-aws-account-foundation-design.md`. The load-bearing decisions:
+
+**Dedicated member account.** `rockcyber-mlops-toxic` is created by `organizations:CreateAccount` from the `rock@rockcyber.com` management account, inside a new `Sandbox` OU. Organizations creates `OrganizationAccountAccessRole` automatically, which is why no routine phase of this project ever handles a root credential. The existing RCAP workloads run in the organization **management** account, and SCPs never apply to a management account, so RCAP is structurally immune to these guardrails rather than merely excluded. Every org-level write is scoped to the new OU.
+
+**Root stays as break-glass.** The account root user is hardened, not removed: MFA enrolled, no access keys, never used for routine work, strong password in a password manager, and a CloudTrail plus EventBridge alarm on any root activity. AWS Organizations centralized root access management is deliberately **not** enabled, because it has no OU-level scoping and would reach RCAP, and because `sts:AssumeRoot` covers only five task policies rather than substituting for root. Full reasoning in spec section 5.2.
+
+**No static AWS credentials exist.** Humans authenticate through IAM Identity Center with short-lived SSO sessions. GitHub Actions authenticates through OIDC. EC2 authenticates through instance profiles. The SCP on the OU denies `iam:CreateUser` and `iam:CreateAccessKey`, which turns this from a convention into an enforced control.
+
+**The SCP is also the cost guardrail.** It denies every region except `us-west-2` and `us-east-1`, denies GPU and metal instance families, restricts `ec2:RunInstances` to a Graviton size allowlist through the resource-level `ec2:InstanceType` key, denies Aurora cluster creation, forces RDS to be private and Secrets-Manager-managed, and blocks tampering with CloudTrail and GuardDuty. A budget alert fires at 50, 80, and 100 percent of $100 per month. There is no automated stop action, by owner decision, so the SCP carries that load for compute. It cannot carry it for RDS instance class, because `rds:DatabaseClass` is not supported on `rds:CreateDBInstance`. Every condition key was verified against the AWS service reference.
+
+**Console work is four one-time operations.** Enable IAM Identity Center, create the directory user, create an `AdministratorAccess` permission set, assign it to the management account. There is no API to create an Identity Center organization instance, which makes this the irreducible manual surface. Everything after it is an API call.
+
+**No SSH and no NAT gateway.** Deployment runs over SSM Run Command, so port 22 never opens and there is no key to manage. EC2 sits in public subnets behind an ingress allowlist with IMDSv2 required, and RDS sits private with no internet path. A NAT gateway would consume roughly a third of the monthly budget and buy nothing here.
 
 ## 4. Model strategy (evidence-grounded)
 
@@ -148,11 +172,21 @@ Per run, log: git SHA, hyperparameters, data version and dedup/split seed, and m
 
 ## 12. CI/CD
 
-`.github/workflows/ci.yml` triggers on pull requests to `main`. It runs ruff (lint) and the full pytest suite (unit plus integration). A pull request cannot merge if either fails. A separate scheduled workflow runs the RunPod reaper.
+`.github/workflows/ci.yml` triggers on pull requests to `main`. It runs ruff (lint), the full pytest suite (unit plus integration), gitleaks, semgrep, and `terraform fmt`, `validate`, and `plan`. A pull request cannot merge if any of them fails.
+
+`.github/workflows/deploy.yml` triggers on push to `main`. It builds the four component images natively on `ubuntu-24.04-arm` runners (free and unlimited on a public repository), tags them by git SHA, pushes to ECR, runs `terraform apply`, and rolls the containers through SSM Run Command. The `production` GitHub environment gates it with required review.
+
+Two OIDC roles, not one. `gha-ci` is trusted on any ref and holds read plus `terraform plan`. `gha-deploy` is trusted only on `refs/heads/main` and `environment:production` and holds apply, ECR push, and SSM `SendCommand`. That split is what stops a pull request from a fork reaching production credentials. No AWS access key is stored in GitHub.
+
+A separate scheduled workflow runs the RunPod reaper.
 
 ## 13. Containerization and deployment
 
-One Docker image per component. EC2 #1 runs the FastAPI backend and the Streamlit UI. EC2 #2 runs the monitoring dashboard and the DistilBERT re-scorer worker. A `docker-compose.yml` brings the stack up locally. Deploy scripts stand up the two EC2 instances with Docker installed and pull the pinned model artifacts at deploy.
+One Docker image per component, built for arm64 and stored in ECR with immutable tags and scan on push. EC2 #1 runs the FastAPI backend and the Streamlit UI. EC2 #2 runs the monitoring dashboard and the DistilBERT re-scorer worker. A `docker-compose.yml` brings the stack up locally.
+
+Terraform stands up the VPC, both EC2 instances, RDS, ECR, IAM, and the observability and budget resources. Instance user data installs Docker and the compose plugin. Deployment pulls the pinned image digest and the pinned model artifact, verifies SHA-256, and restarts the stack.
+
+Deployment reaches the instances through SSM Run Command. No SSH, no key material, no bastion, no open port 22. The deploy job selects instances by tag rather than by address, so a replaced instance needs no pipeline change.
 
 ## 14. Testing
 
@@ -187,13 +221,24 @@ mlops-toxic-moderation/
     Dockerfile
   infra/
     docker-compose.yml
-    ec2_deploy/
+    aws/
+      bootstrap.sh                  # one-time org + account + state bucket
+      scp-sandbox-guardrails.json   # SCP attached to the Sandbox OU
+    terraform/                      # everything inside the account
+      network.tf compute.tf data.tf
+      iam.tf oidc.tf ecr.tf
+      observability.tf budget.tf
+      backend.tf variables.tf outputs.tf
     runpod/               # pod lifecycle, reaper
-  .github/workflows/ci.yml
+  .github/workflows/
+    ci.yml                # lint, tests, scans, terraform plan
+    deploy.yml            # arm64 build, ECR push, apply, SSM roll
+    runpod-reaper.yml
   tests/
     unit/
     integration/
   README.md
+  SECURITY.md             # VDP, mandatory now that the repo is public
   MODEL_CARD.md           # plus CycloneDX AIBOM companion
 ```
 
@@ -221,10 +266,19 @@ Pull working code forward rather than starting from scratch. Monorepo root: `/Us
 
 ## 18. Risks and open questions
 
-- EC2 sizing for the re-scorer: confirm the instance class after measuring ONNX int8 throughput on a representative queue.
-- Reviewer identity and access: the reviewer UI needs a minimal auth story; scope it to a single reviewer role unless a fuller model is requested.
-- Input text retention: `predictions.input_text` stores user comments; set a retention policy and note it in the model card.
-- Pairs: the course recommends pairs. If a partner joins, follow a branch-and-PR flow so both partners' work is attributable.
+Open:
+
+- EC2 sizing for the re-scorer. Confirm the instance class after measuring ONNX int8 throughput on a representative queue.
+- Ingress exposure. The security group allowlist defaults to the operator address. Opening it for a public demo window is a variable toggle, and it must be closed again afterward.
+- RDS cost guardrail. No SCP-enforceable instance-class cap exists for standalone RDS instances, verified against the AWS service reference. The budget alarm and the Terraform-pinned class are the only controls.
+
+Closed since v1.0:
+
+- Reviewer identity and access. Single reviewer role behind a shared secret. Named in the model card as not being a real authentication system.
+- Input text retention. Retain `predictions.input_text` for 30 days, then a scheduled purge nulls the text and keeps the rest of the row. Configurable via `INPUT_TEXT_RETENTION_DAYS`.
+- Pairs. Solo project, no partner attribution.
+- Repository visibility. Public, which makes the `SECURITY.md` VDP mandatory under QC.1.
+- AWS account model. Dedicated Organizations member account, section 3.1.
 
 ## 19. References
 

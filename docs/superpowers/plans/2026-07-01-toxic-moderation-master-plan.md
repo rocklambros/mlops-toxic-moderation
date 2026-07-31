@@ -21,7 +21,8 @@ Every task inherits these. Values are copied verbatim from the design spec (`doc
 - **Headline metrics: macro-F1 and per-label PR-AUC with confidence intervals.** Accuracy is banned as a headline metric because the class imbalance makes it misleading. It may be logged, never promoted on.
 - **RunPod cost governance.** Ephemeral pods only, no persistent GPU pods. Teardown in a `trap EXIT` / `finally` so the pod dies on success, failure, and interrupt. A scheduled GitHub Action reaper kills pods past a hard TTL or idle threshold. Spending cap plus alarm. Prefer interruptible spot pods for the sweep. Right-size to a mid-tier GPU (L4 / 4090 / A40) and fan out several pods for the sweep rather than renting one large card.
 - **Model output contract (stable interface).** See the interface contracts section. The database and UI never change when the model swaps.
-- **Supply chain (QC.1 / NIST SP 800-218).** Pinned dependencies with hashes where practical, gitleaks secret scanning, semgrep SAST gate on executable additions, an SBOM. The repo is private, so the VDP `SECURITY.md` (QC.1 scopes it to public projects) is not mandatory; add it only if the repo is later made public.
+- **Supply chain (QC.1 / NIST SP 800-218).** Pinned dependencies with hashes where practical, gitleaks secret scanning, semgrep SAST gate on executable additions, an SBOM. The repo is public as of 2026-07-30, so the VDP `SECURITY.md` is mandatory.
+- **AWS foundation (added 2026-07-30).** Runtime lives in a dedicated AWS Organizations member account `rockcyber-mlops-toxic` in `us-west-2`, inside a `Sandbox` OU carrying a service control policy. No static AWS credentials exist anywhere: humans use IAM Identity Center, CI uses GitHub OIDC, EC2 uses instance profiles. Deployment runs over SSM Run Command with no SSH and no open port 22. See `docs/superpowers/specs/2026-07-30-aws-account-foundation-design.md`.
 - **Git workflow.** Feature-branch and PR flow. Never commit to main directly (the genesis commit that established main is the sole exception). Human author (`rocklambros <rock@rockcyber.com>`). No AI attribution in commits, code, or docs. If a partner joins, record them and keep both partners' work attributable through branch-and-PR.
 
 ## Repository Structure
@@ -67,12 +68,16 @@ mlops-toxic-moderation/
     Dockerfile
   infra/
     docker-compose.yml    # local full stack (Phase 5)
-    ec2_deploy/           # 2x EC2 + RDS stand-up, deploy-time artifact fetch (Phase 5)
+    aws/
+      bootstrap.sh                  # org + account + state bucket (Phase A)
+      scp-sandbox-guardrails.json   # SCP on the Sandbox OU (Phase A)
+    terraform/            # VPC, EC2, RDS, ECR, IAM, OIDC, budget (Phase A)
     runpod/               # pod lifecycle + reaper (Phase 1)
   requirements/
     base.txt dev.txt train.txt serve.txt   # pinned per surface (Phase 0+)
   .github/workflows/
-    ci.yml                # lint + tests gate on PR (Phase 4)
+    ci.yml                # lint + tests + scans + tf plan gate on PR (Phase 4)
+    deploy.yml            # arm64 build, ECR push, apply, SSM roll (Phase 5)
     runpod-reaper.yml     # scheduled TTL reaper (Phase 1)
   tests/
     unit/
@@ -81,7 +86,7 @@ mlops-toxic-moderation/
   pyproject.toml
   README.md               # operator guide, finalized Phase 5
   MODEL_CARD.md           # metrics + provenance, drafted Phase 1, final Phase 5
-  SECURITY.md             # VDP (Phase 5, only if repo goes public)
+  SECURITY.md             # VDP (Phase 5, mandatory, repo is public)
   aibom.json              # CycloneDX AIBOM (Phase 5)
 ```
 
@@ -178,15 +183,49 @@ def submit_review(session, request_id: str, reviewer_labels: dict[str, int], rev
 ## Phase Dependency Graph
 
 ```
-Phase 0 (data + firewall + contract)
-   -> Phase 1 (train, register, promote, ONNX)  [needs: Jigsaw data, W&B, RunPod]
-        -> Phase 2 (FastAPI + safe load + RDS)   [needs: promoted classical artifact + digest, thresholds.json]
+Phase A (AWS account foundation)  ---------------+   [independent, runs any time]
+                                                 |
+Phase 0 (data + firewall + contract)             |
+   -> Phase 1 (train, register, promote, ONNX)   |   [needs: Jigsaw data, W&B, RunPod]
+        -> Phase 2 (FastAPI + safe load + RDS) <-+   [needs: Phase A RDS, promoted artifact + digest, thresholds.json]
              -> Phase 3 (UI + monitoring + rescorer)  [needs: /predict, DB schema, ONNX DistilBERT artifact]
                   -> Phase 4 (tests consolidation + CI gate)  [runs the suites built across 0-3]
-                       -> Phase 5 (Docker + 2x EC2 deploy + docs + AIBOM)  [needs: all images, digests, measured ONNX throughput]
+                       -> Phase 5 (Docker + ECR + SSM deploy + docs + AIBOM)  [needs: Phase A, all images, digests, measured ONNX throughput]
 ```
 
+Phase A has no dependency on Phases 0 or 1 and can run in parallel with them. It must finish before Phase 2 needs a real RDS instance.
+
 Each phase produces a working, testable increment and lands on its own feature branch merged by PR.
+
+---
+
+## Phase A: AWS account foundation
+
+**Deliverable:** A dedicated AWS Organizations member account with guardrails, identity, network, compute, data, registry, and pipeline roles in place, provisioned with zero static credentials and reproducible from code. **Design spec:** `docs/superpowers/specs/2026-07-30-aws-account-foundation-design.md`. Read it before starting.
+
+**Branch:** `feat/phase-a-aws-foundation`.
+
+**Prerequisites (verify before task 1):** AWS CLI v2 installed (v1.35.0 is currently installed and is not sufficient), Terraform 1.11 or newer (1.5.7 is currently installed, and S3 native state locking went GA in 1.11), `gh` authenticated, the repository made public, and IAM Identity Center enabled with a working `aws configure sso` profile. `docs/HANDOFF.md` carries the exact commands under "Do this next". Root-address mail delivery is not a prerequisite, it is the operator gate at bootstrap step 7.
+
+**Files:** `infra/aws/bootstrap.sh`, `infra/aws/scp-sandbox-guardrails.json`, `infra/terraform/*.tf`, `.github/workflows/deploy.yml`, `docs/HANDOFF.md`, `docs/rcap-iam-audit.md`, `SECURITY.md`.
+
+**Tasks:**
+1. Console, one time, four operations: enable IAM Identity Center in the management account with home region `us-west-2`, create the directory user, create an `AdministratorAccess` permission set, assign it to the management account. Then `aws configure sso`. Verify with `aws sts get-caller-identity`.
+2. `infra/aws/scp-sandbox-guardrails.json`: region lock on `aws:RequestedRegion`, deny `iam:CreateUser` and `iam:CreateAccessKey`, Graviton instance-type allowlist plus GPU and metal denial via `ec2:InstanceType` **scoped to `Resource: "arn:aws:ec2:*:*:instance/*"`**, deny `rds:CreateDBCluster`, require `rds:ManageMasterUserPassword` and deny `rds:PubliclyAccessible` on `rds:CreateDBInstance`, deny leaving the org, deny CloudTrail and GuardDuty tampering. **Do not attempt an RDS class cap with `rds:DatabaseClass`.** It is unsupported on `CreateDBInstance` and would deny all RDS creation. See spec section 5.1 for both traps. Validate the JSON before attaching.
+3. `infra/aws/bootstrap.sh`: idempotent, ten ordered steps per spec section 6, which names every verified CLI operation. **The script never calls `iam enable-organizations-root-credentials-management` and never deletes a root credential.** Root is break-glass and stays, per spec section 5.2. Step 7 is an operator step that establishes the break-glass: root password recovery, strong password, MFA enrolled, no access keys. Every org-level write the script performs is scoped to the new `Sandbox` OU, so no existing account changes posture.
+4. `infra/terraform/`: VPC with two public and two private subnets and no NAT gateway, security groups with no port 22, both EC2 instances with IMDSv2 required, RDS Postgres 16 with `manage_master_user_password = true`, four ECR repositories, instance profiles, the `gha-ci` and `gha-deploy` OIDC roles, CloudTrail, GuardDuty, CloudWatch log groups at 14-day retention, and the $100 budget with alerts at 50, 80, and 100 percent.
+5. `.github/workflows/deploy.yml`: build four arm64 images on `ubuntu-24.04-arm`, tag by git SHA, push to ECR, `terraform apply`, roll containers through SSM Run Command. Gated by the `production` environment with required review.
+6. Seed Secrets Manager by CLI with the W&B API key and the reviewer shared secret. No secret value enters Terraform state or the repository.
+7. `Makefile` targets `aws-up` and `aws-down` that start and stop EC2 and RDS between sessions. Document that a stopped RDS instance restarts automatically after seven days.
+8. `docs/rcap-iam-audit.md`: read-only audit of account `<MGMT_ACCOUNT_ID>`, which is the organization **management** account and also runs RCAP. Access key age, attached policy breadth, MFA state, root credential state, public S3, CloudTrail coverage, and the fact that a production workload sits in the management account where SCPs cannot constrain it. **Read-only API calls only, no writes to that account.**
+9. `SECURITY.md`: **done 2026-07-30**, ahead of Phase A. Review only. GitHub private vulnerability reporting, secret scanning, and push protection are enabled on the repository.
+10. `docs/HANDOFF.md`: current stage, what exists where, exact resume command.
+
+**Test strategy:** Re-run `bootstrap.sh` and confirm it is a no-op. Run `terraform plan` and confirm no drift after apply. Confirm the SCP actually denies by attempting a denied action (a `t3.large` launch or an `iam:CreateAccessKey` call) and observing the denial. Confirm `gha-ci` cannot assume deploy permissions. Confirm no security group allows port 22. Confirm `terraform destroy` cleanly removes everything.
+
+**Exit criteria:** account created inside the `Sandbox` OU with the SCP attached, root break-glass established (MFA on, no access keys, password stored, root-usage alarm firing on a test), no organization-wide setting changed and RCAP's posture provably unchanged, SSO login works from both the Mac and the Jetson, `terraform apply` and `terraform destroy` both succeed, a denied action is observed to fail, no static AWS access key exists in the account, budget alerts configured, RCAP audit written, and the whole thing merged by PR.
+
+**Enforcement skills:** `writing-deny-allow-rules`, `triaging-vulnerability-findings`, `writing-vdp-and-coordinated-disclosure`, `building-rollback-plan`.
 
 ---
 
@@ -224,7 +263,7 @@ Each phase produces a working, testable increment and lands on its own feature b
 
 **Deliverable:** Two registered W&B artifacts with digests and metric-bearing model cards: the classical winner promoted to Production, and DistilBERT as an ONNX int8 challenger. A `thresholds.json` artifact tuned on validation. Held-out test evaluated exactly once. RunPod cost governance active.
 
-**Branch:** `feat/phase-1-train-register`. **Needs:** the Kaggle Jigsaw archive (`julian3833/jigsaw-multilingual-toxic-comment-classification`); use the `jigsaw-toxic-comment-train.csv` English six-label file inside it, not the multilingual `validation.csv`/`test.csv` or `jigsaw-unintended-bias-train.csv`. A new W&B project, RunPod API key + budget cap, GPU pods. Credentials live on the Jetson; AWS region us-west-1. See Resolved Decisions.
+**Branch:** `feat/phase-1-train-register`. **Needs:** the Kaggle Jigsaw archive (`julian3833/jigsaw-multilingual-toxic-comment-classification`); use the `jigsaw-toxic-comment-train.csv` English six-label file inside it, not the multilingual `validation.csv`/`test.csv` or `jigsaw-unintended-bias-train.csv`. A new W&B project, RunPod API key + budget cap, GPU pods. RunPod, W&B, and Kaggle credentials live on the Jetson. AWS region `us-west-2`. See Resolved Decisions.
 
 **Files:** `model/train_classical.py`, `model/evaluate.py`, `model/thresholds.py`, `model/tracking.py`, `model/sweep.py`, `model/train_distilbert.py`, `model/export_onnx.py`, `infra/runpod/*`, `.github/workflows/runpod-reaper.yml`, `requirements/train.txt`, draft `MODEL_CARD.md`.
 
@@ -325,21 +364,21 @@ Each phase produces a working, testable increment and lands on its own feature b
 
 ## Phase 5: Docker, two-EC2 deploy, README, model card, AIBOM
 
-**Deliverable:** One Docker image per component, a docker-compose local full stack, deploy scripts that stand up EC2 #1 (backend + frontend) and EC2 #2 (monitoring + rescorer) with Docker and pull pinned model artifacts by digest at deploy (verify SHA-256, bake), an RDS Postgres, and the finished operator docs: `README.md`, `MODEL_CARD.md`, CycloneDX `aibom.json`, an `input_text` retention purge job, and a rollback plan (plus a `SECURITY.md` VDP only if the repo becomes public).
+**Deliverable:** One arm64 Docker image per component in ECR, a docker-compose local full stack, a working `deploy.yml` that builds, pushes, applies, and rolls containers through SSM Run Command onto the Phase A instances, deploy-time model artifact fetch by digest (verify SHA-256, bake), and the finished operator docs: `README.md`, `MODEL_CARD.md`, CycloneDX `aibom.json`, an `input_text` retention purge job, a rollback plan, and the mandatory `SECURITY.md` VDP.
 
-**Branch:** `feat/phase-5-deploy-docs`. **Needs:** all component images, W&B digests, measured ONNX int8 throughput (drives EC2 #2 sizing).
+**Branch:** `feat/phase-5-deploy-docs`. **Needs:** Phase A complete (account, VPC, EC2, RDS, ECR, OIDC roles), all component images, W&B digests, measured ONNX int8 throughput (drives the EC2 #2 sizing confirmation).
 
-**Files:** `infra/docker-compose.yml`, `infra/ec2_deploy/*` (provision + `fetch_artifacts.sh` deploy-time digest-verified fetch + run), finalized `MODEL_CARD.md`, `aibom.json`, `README.md`, `SECURITY.md`, `infra/ec2_deploy/ROLLBACK.md`.
+**Files:** `infra/docker-compose.yml`, `.github/workflows/deploy.yml`, `infra/aws/fetch_artifacts.sh` (deploy-time digest-verified fetch), finalized `MODEL_CARD.md`, `aibom.json`, `README.md`, `SECURITY.md`, `infra/ROLLBACK.md`.
 
 **Tasks:**
 1. `infra/docker-compose.yml`: backend, frontend, monitoring, rescorer, postgres with mounted/baked artifacts + env.
-2. `infra/ec2_deploy/`: provision two EC2 + RDS (scripted or documented), install Docker, deploy-time artifact fetch from W&B by digest with SHA-256 verify and bake, run per host, least-privilege security groups (EC2 #1 public API, EC2 #2 restricted) and IAM. Resolve EC2 #2 instance class from the measured ONNX throughput.
+2. Deployment on the Phase A infrastructure: `deploy.yml` builds four arm64 images on `ubuntu-24.04-arm`, tags by git SHA, pushes to ECR through `gha-deploy`, runs `terraform apply`, and rolls containers through SSM Run Command with no SSH. `infra/aws/fetch_artifacts.sh` fetches the W&B artifact by digest, verifies SHA-256, and bakes it. Confirm or resize the EC2 #2 instance class from the measured ONNX throughput, staying inside the SCP allowlist.
 3. Finalize `MODEL_CARD.md` + generate CycloneDX `aibom.json`, verify it scores 100% on the AIBOM evaluator. (`writing-model-cards`.)
 4. `README.md` operator guide: architecture, run locally, deploy, endpoints, input_text retention policy, reviewer auth note, cost governance. (`writing-repo-documentation`.)
 5. `input_text` retention purge: a scheduled job (cron or a small container) that nulls `predictions.input_text` older than `INPUT_TEXT_RETENTION_DAYS` (default 30), keeping the rest of the row for monitoring. Note it in the model card and README.
 6. Dependency SBOM. (`generating-sbom`.)
 7. Rollback plan. (`building-rollback-plan`; optional `building-canary-rollout`.)
-8. Conditional `SECURITY.md` VDP + coordinated disclosure, only if the repo is made public (it is private now). (`writing-vdp-and-coordinated-disclosure`.)
+8. `SECURITY.md` VDP + coordinated disclosure. Mandatory, the repo is public. Written in Phase A, reviewed here. (`writing-vdp-and-coordinated-disclosure`.)
 
 **Test strategy:** `docker compose up` runs the full stack locally and serves a `/predict` end to end. Deploy scripts validated against a throwaway EC2 + RDS. AIBOM verified by the evaluator.
 
@@ -356,6 +395,7 @@ Each phase produces a working, testable increment and lands on its own feature b
 | 1 | Six graded components on AWS | Phases 1-5 (W&B, FastAPI, RDS, Streamlit, monitoring, CI) |
 | 2 | Multi-label, six labels, imbalance; macro-F1 + PR-AUC + CIs; accuracy banned | Phase 0 labels/contract; Phase 1 evaluate |
 | 3 | Build-time vs runtime split; W&B deploy-time only | Global constraints; Phase 1 registry; Phase 5 deploy fetch |
+| 3.1 | AWS account, identity, guardrails | Phase A (all tasks) |
 | 4 | Classical online + DistilBERT async; rationale | Phase 1 tasks 1-8 |
 | 5 | Output contract JSON; `/health` | Phase 0 contract; Phase 2 app |
 | 6 | Leakage/overfitting firewall (all clauses) | Phase 0 dedup/split/firewall_check; Phase 1 thresholds/overfit |
@@ -391,16 +431,16 @@ Read the seed before each phase and adapt it; do not rebuild from scratch.
 
 Answers from the owner. These close the spec section 18 risks and the plan prerequisites.
 
-1. **Accounts and secrets.** A new W&B project. Credentials (W&B entity, RunPod API key, AWS creds) live on the Jetson, which is the operator and build box: it holds the creds and runs training and deploy. AWS region us-west-1 (N. California). Provisioning happens on the Jetson when we proceed. **Assumption:** the runtime target stays AWS EC2 + RDS per the locked architecture; the Jetson is the control and build machine, not the runtime host. (Say so if you meant the runtime to live on the Jetson; that would contradict the locked "100% AWS runtime.") The Jetson is aarch64, which pairs cleanly with the Graviton (arm64) instances below: build arm64 images on the Jetson, run them on Graviton EC2 directly.
+1. **Accounts and secrets (revised 2026-07-30).** A new W&B project. The Jetson is the operator and build box, not the runtime host. It holds the W&B entity, the RunPod API key, and the Kaggle credentials. It holds **no static AWS credentials**, because none exist in this project. AWS access on both the Jetson and the Mac comes from an IAM Identity Center SSO profile issuing short-lived sessions, so either machine can build and deploy and neither is a credential store. CI is the primary deployment path and the Jetson is the manual fallback. AWS region `us-west-2` (Oregon), changed from `us-west-1` because N. California carries a price premium and has two AZs rather than four. The Jetson is aarch64, which still pairs cleanly with Graviton for local builds, though CI now builds arm64 natively on free `ubuntu-24.04-arm` runners. Provisioning is Phase A.
 2. **Jigsaw data.** Kaggle download: `https://www.kaggle.com/api/v1/datasets/download/julian3833/jigsaw-multilingual-toxic-comment-classification`. That archive packages several Jigsaw competitions. Use the file `jigsaw-toxic-comment-train.csv` inside it: the original English Toxic Comment Classification Challenge training set with the six labels (`id, comment_text, toxic, severe_toxic, obscene, threat, insult, identity_hate`), which matches the loader's `REQUIRED_COLUMNS`. Do not train on `jigsaw-unintended-bias-train.csv` (different schema) or `validation.csv` / `test.csv` (multilingual, single label); either would break the English six-label scope.
 3. **Reviewer auth.** Single reviewer role behind a shared secret. Confirmed.
 4. **input_text retention (recommendation).** Retain raw `predictions.input_text` for 30 days, then a scheduled purge nulls `input_text` while keeping the rest of the row (probabilities, decision, flags, timestamps, latency) for long-term monitoring. Rationale: the human-review queue and the drift and accuracy windows need the raw text short-term; keeping user comments (potentially toxic or PII-bearing) indefinitely is an avoidable privacy liability. Configurable via `INPUT_TEXT_RETENTION_DAYS` (default 30). Never write raw text to W&B or application logs; only the access-restricted RDS row holds it. Documented in the model card and README, implemented as a purge job in Phase 5.
 5. **Partner.** Solo. No partner attribution.
-6. **Repo visibility.** Private. The VDP `SECURITY.md` requirement (QC.1, scoped to public projects) is not mandatory. gitleaks, semgrep, and the SBOM stay. Add `SECURITY.md` only if the repo is later made public.
+6. **Repo visibility (revised 2026-07-30).** Public. The assignment deliverable requires a public repository, and a public repository grants free unlimited `ubuntu-24.04-arm` runners, which lets CI build Graviton images natively instead of under QEMU. The VDP `SECURITY.md` is now mandatory under QC.1. gitleaks, semgrep, and the SBOM stay. Everything is designed public-safe from the first commit, since flipping public later would expose the full history anyway.
 7. **Python.** 3.11, confirmed (pinned `requires-python = ">=3.11,<3.12"`).
 8. **Phase plan expansion.** Just-in-time per phase (Phase 0 detailed now; 1-5 expanded at the start of each phase). Unchanged.
 
-### AWS instance sizing (us-west-1, low spend, class project)
+### AWS instance sizing (us-west-2, low spend, class project)
 
 Recommendation. All Graviton (arm64) to match the aarch64 Jetson build box and to cut roughly 20% off the equivalent x86 on-demand rate. Every dependency (numpy, scipy, scikit-learn, onnxruntime, pydantic) ships aarch64 wheels; skops and datasketch are pure Python. If any wheel misbehaves on arm64, the x86 fallback is in the last column.
 
@@ -410,13 +450,21 @@ Recommendation. All Graviton (arm64) to match the aarch64 Jetson build box and t
 | EC2 #2 (monitoring + DistilBERT ONNX int8 re-scorer) | `t4g.large` (start) | 2 / 8 GB | Async, intermittent queue drain suits a burstable instance; 8 GB covers onnxruntime + tokenizer + dashboard. Confirm or upsize to `c7g.xlarge` (4 vCPU) after measuring ONNX int8 throughput (spec section 18) if the drain is slow or the queue is large and continuous | `c6i.large` / `c6i.xlarge` |
 | RDS Postgres | `db.t4g.micro` | 2 / 1 GB | Tiny predictions table, low write rate, a few time-bucket aggregations and one join. Bump to `db.t4g.small` (2 GB) if the dashboard queries lag | same (RDS engine is arch-agnostic to clients) |
 
-RDS config: Postgres 16, 20 GB gp3 (minimum, cheap), Single-AZ (no Multi-AZ for a class project; it halves the cost), us-west-1.
+RDS config: Postgres 16, 20 GB gp3 (minimum, cheap), Single-AZ (no Multi-AZ for a class project, it halves the cost), `us-west-2`, private subnets, `manage_master_user_password = true` so the password lives in Secrets Manager rather than Terraform state.
 
-**Cost control matters more than instance class here.** Stop both EC2 instances and the RDS instance between work sessions; run them only during development and the demo. Approximate us-west-1 on-demand rates (verify in the AWS Pricing Calculator, do not treat as exact): EC2 #1 around $0.037/hr, EC2 #2 around $0.074/hr, RDS around $0.017/hr, so roughly $0.13/hr with everything on. Left running 24/7 that is roughly $90/month; run only during sessions (tens of hours total) and it is a few dollars. gp3 and the 20 GB RDS volume persist at cents/month when stopped. Set a small AWS Budget alarm.
+**Cost control matters more than instance class here.** Stop both EC2 instances and the RDS instance between work sessions and run them only during development and the demo. Approximate `us-west-2` on-demand rates (verify in the AWS Pricing Calculator, do not treat as exact): EC2 #1 around $0.034/hr, EC2 #2 around $0.067/hr, RDS around $0.016/hr, so roughly $0.12/hr with everything on. Left running continuously that approaches the $100 monthly ceiling. Run only during sessions and it stays in single-digit dollars. gp3 and the 20 GB RDS volume persist at cents/month when stopped.
+
+Controls, strongest first: the SCP instance-type allowlist is a hard denial, `terraform destroy` is the full teardown, `make aws-down` and `make aws-up` stop and start between sessions, and budget alerts fire at 50, 80, and 100 percent of $100. There is no automated stop action, by owner decision.
+
+**Gotcha to remember.** A stopped RDS instance restarts automatically after seven days. Stopped is not off. For gaps longer than a week, destroy rather than stop.
+
+**No NAT gateway.** It would cost roughly a third of the monthly ceiling on its own. EC2 sits in public subnets behind an ingress allowlist with IMDSv2 required and no port 22, and RDS sits private with no internet path.
 
 ## Execution Handoff
 
-Phase 0 is fully detailed and ready to execute in `docs/superpowers/plans/2026-07-01-phase-0-data-firewall.md`. Two execution options:
+Two phases are ready to start. **Phase A** is specified in `docs/superpowers/specs/2026-07-30-aws-account-foundation-design.md` and summarized above, and it needs a detailed plan file written before execution. **Phase 0** is fully detailed in `docs/superpowers/plans/2026-07-01-phase-0-data-firewall.md`. They are independent, so either can go first. See `docs/HANDOFF.md` for the current stage and the resume command.
+
+Two execution options:
 
 1. **Subagent-Driven (recommended):** a fresh subagent per task with review between tasks. REQUIRED SUB-SKILL: `superpowers:subagent-driven-development`.
 2. **Inline Execution:** execute tasks in-session with checkpoints. REQUIRED SUB-SKILL: `superpowers:executing-plans`.

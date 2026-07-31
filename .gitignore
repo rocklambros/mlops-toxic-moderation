@@ -17,6 +17,18 @@ secrets/
 *.pem
 *.key
 
+# Account, organization, and instance identifiers. Not credentials, but the repo
+# is public and these aid targeting and enumeration. Committed docs use
+# placeholders and resolve them from these files.
+*.local.md
+infra/aws/bootstrap-outputs.env
+
+# Superseded AWS Academy Learner Lab requirements note. Carries a Vocareum
+# `vockey` session token inside its URLs, so it must never reach this public
+# repository. The Learner Lab path was abandoned 2026-07-30 in favour of a
+# dedicated Organizations member account.
+claudedocs/mlops_final_project_requrements_aws.md
+
 # Data (raw Jigsaw dataset and derived splits are not versioned in git)
 data/
 *.csv
