@@ -1,0 +1,53 @@
+set -euo pipefail
+
+# Runs as root under SSM Run Command on the backend instance, which is the only
+# tier with a network path to the private database. There is no SSH and no
+# bastion, so this is the whole administration channel for the data tier.
+
+# The AWS CLI on this instance has no configured region. Resolve it from IMDSv2
+# rather than depending on an env file that a later phase writes.
+IMDS_TOKEN=$(curl -sS -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 300' \
+  http://169.254.169.254/latest/api/token)
+AWS_DEFAULT_REGION=$(curl -sS -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+  http://169.254.169.254/latest/meta-data/placement/region)
+export AWS_DEFAULT_REGION
+
+# psql 15 and psql 16 both speak to a Postgres 16 server, and AL2023 has shipped
+# one or the other depending on the AMI vintage. Try the newer package first.
+dnf -qy install postgresql16 jq || dnf -qy install postgresql15 jq
+
+MASTER_JSON=$(aws secretsmanager get-secret-value --secret-id '{{MasterSecretArn}}' --query SecretString --output text)
+RO_JSON=$(aws secretsmanager get-secret-value --secret-id '{{ReadonlySecretArn}}' --query SecretString --output text)
+
+MASTER_USER=$(printf '%s' "$MASTER_JSON" | jq -r .username)
+RO_USER=$(printf '%s' "$RO_JSON" | jq -r .username)
+RO_PASS=$(printf '%s' "$RO_JSON" | jq -r .password)
+PGPASSWORD=$(printf '%s' "$MASTER_JSON" | jq -r .password)
+export PGPASSWORD
+
+# An unseeded container yields the JSON null, which would otherwise become the
+# literal password "null". Fail loudly instead.
+test -n "$RO_USER" && test "$RO_USER" != null
+test -n "$RO_PASS" && test "$RO_PASS" != null
+
+# The master password crosses the VPC on this connection; require TLS for it.
+PGSSLMODE=require
+export PGSSLMODE
+
+umask 077
+cat > /tmp/monitoring_readonly.sql <<'TOXICMODSQL'
+${sql}
+TOXICMODSQL
+
+psql --host '{{DbHost}}' --username "$MASTER_USER" --dbname '{{DbName}}' \
+  --no-psqlrc \
+  --set ON_ERROR_STOP=1 \
+  --set ro_user="$RO_USER" \
+  --set ro_pass="$RO_PASS" \
+  --set master_user="$MASTER_USER" \
+  --set db_name='{{DbName}}' \
+  --file /tmp/monitoring_readonly.sql
+
+rm -f /tmp/monitoring_readonly.sql
+unset PGPASSWORD
+echo "monitor_ro bootstrap complete"

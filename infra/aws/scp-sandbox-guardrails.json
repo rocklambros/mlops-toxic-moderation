@@ -105,24 +105,36 @@
       "Resource": "*"
     },
     {
-      "Sid": "DenyDetectiveControlTampering",
+      "Sid": "DenyDetectiveControlBlinding",
       "Effect": "Deny",
       "Action": [
         "cloudtrail:StopLogging",
-        "cloudtrail:DeleteTrail",
         "cloudtrail:UpdateTrail",
         "cloudtrail:PutEventSelectors",
         "cloudtrail:PutInsightSelectors",
-        "guardduty:DeleteDetector",
         "guardduty:UpdateDetector",
         "guardduty:DeleteMembers",
         "guardduty:DisassociateFromAdministratorAccount",
         "guardduty:DisassociateMembers",
-        "guardduty:DeletePublishingDestination",
         "guardduty:UpdatePublishingDestination",
         "guardduty:StopMonitoringMembers"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "DenyDetectiveControlDeletionExceptOrgTeardown",
+      "Effect": "Deny",
+      "Action": [
+        "cloudtrail:DeleteTrail",
+        "guardduty:DeleteDetector",
+        "guardduty:DeletePublishingDestination"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ArnNotLike": {
+          "aws:PrincipalArn": "arn:aws:sts::*:assumed-role/OrganizationAccountAccessRole/*"
+        }
+      }
     },
     {
       "Sid": "DenyTrailEvidenceDestruction",

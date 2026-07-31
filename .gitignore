@@ -75,3 +75,15 @@ htmlcov/
 
 # Raw dataset, fetched by scripts/fetch_jigsaw.sh, never committed
 /data/raw/
+
+# Terraform. The lock file IS committed (it pins provider hashes); state and local
+# working dirs are not. tfvars may carry the operator CIDR and alert email, so only
+# the example is tracked.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+*.tfvars
+!*.tfvars.example
