@@ -240,7 +240,7 @@ Test-driven throughout: write the failing test, run it and see it fail, write th
 | Core 6 — CI/CD | Phase 4 t1 `.github/workflows/ci.yml` | Green run + blocked-merge screenshot |
 | 1.1 baseline model | Phase 1 t1 | W&B baseline run |
 | 1.2 log git SHA, hyperparams, metrics **incl. accuracy**, data version | Phase 1 t4 | W&B run page |
-| **1.3 promote to Staging/Production, visibly** | Phase 1 t4 | **Registry page showing `toxic-clf` at Production, logged-out — or a screenshot if the registry is not publicly viewable** |
+| **1.3 promote to Staging/Production, visibly** | Phase 1 t4 | **The W&B Registry page itself, publicly visible logged-out, showing `toxic-clf` at Production.** Owner decision 2026-07-31: the registry page must be visible, not merely screenshotted. See §13 for the evasion exposure this accepts |
 | 2.1 `/predict` + `/health` | Phase 2 t5 | Integration test |
 | 2.2 log every request, output, timestamp | Phase 2 t4–t5 | Round-trip integration test |
 | 3.1 frontend calls backend, displays prediction | Phase 3 t1 | Live screenshot |
@@ -260,7 +260,7 @@ Test-driven throughout: write the failing test, run it and see it fail, write th
 Verify each in a logged-out browser before submitting.
 
 - [ ] **Public GitHub repository URL** — opens without a login; `SECURITY.md` present and accurate; gitleaks-clean history
-- [ ] **Public W&B project dashboard URL** — opens without a login; runs show git SHA, hyperparameters, `data_version`, and metrics including accuracy; **the registry shows a promoted stage**; no raw `input_text` was ever logged; **the model artifact itself is in a private project** (see §6.3)
+- [ ] **Public W&B project dashboard URL** — opens without a login; runs show git SHA, hyperparameters, `data_version`, and metrics including accuracy; **the Registry page is publicly visible and shows `toxic-clf` at a promoted stage** (owner decision, 2026-07-31); no raw `input_text` was ever logged
 - [ ] **Project workflow screenshots** — AWS Console showing three EC2 and RDS, the working prototype live on EC2, the populated monitoring dashboard, and the blocked merge. No raw user text and no account ID visible
 - [ ] **Live prototype URL** — stable Elastic IP endpoint answering `/predict` and serving the UI, reachable after a stop/start cycle, with its availability window stated in the README
 
@@ -277,6 +277,7 @@ Capture the screenshots and the reachability check while the stack is up. Do not
 |---|---|
 | No automated budget stop action | Owner decision, recorded in the AWS foundation spec §5.3. Compensated by the SCP instance-type allowlist, which is a hard denial rather than an alert, plus `terraform destroy` and session-scoped running |
 | No SCP-enforceable RDS instance-class cap | `rds:DatabaseClass` is unsupported on `CreateDBInstance`, verified against the AWS service reference. The budget alarm and the Terraform-pinned class are the only controls. Known gap, not an oversight |
+| **White-box evasion via the public registry** (owner decision, 2026-07-31) | The premortem recommended keeping the model artifact in a *private* W&B project, because publishing the skops artifact and `thresholds.json` hands an attacker the exact coefficient vector and per-label decision boundary of a linear model — evasion becomes an offline optimisation with zero queries and no log entry. The owner has decided the **Registry page must be publicly visible**, since rubric 1.3 grades a visible promotion and a screenshot is weaker evidence than the page. This is a deliberate trade of adversarial robustness for graded evidence, and it is the correct trade for a class project whose deliverable is the MLOps lifecycle rather than a production moderation service. **Disclosed in the model card**, alongside the note that the human-review queue does not mitigate it. Compensating controls that remain in force: the `/predict` rate limit, the input-size cap, and the demo API key or source allowlist |
 | Residual adversarial evasion | Cross-script homoglyphs and heavy paraphrase defeat normalization. Named in the model card. The review queue does not mitigate it, because a successful evasion is never flagged |
 | DistilBERT pretraining contamination | The pretraining corpus may already contain these public comments. Not fixable or gradeable; naming it is the rigor |
 | Single reviewer behind a shared secret | Not a real authentication system. Acceptable for a class project and named as such in the model card |
