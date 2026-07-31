@@ -1,0 +1,165 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyOutsideHomeRegion",
+      "Effect": "Deny",
+      "NotAction": [
+        "iam:*",
+        "sts:*",
+        "organizations:*",
+        "account:*",
+        "budgets:*",
+        "ce:*",
+        "support:*",
+        "health:*",
+        "cloudfront:*",
+        "route53:*",
+        "s3:ListAllMyBuckets",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:RequestedRegion": "us-west-2"
+        }
+      }
+    },
+    {
+      "Sid": "DenyNonAllowlistedInstanceLaunch",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:RunInstances",
+        "ec2:CreateFleet",
+        "ec2:RequestSpotInstances",
+        "ec2:RequestSpotFleet"
+      ],
+      "Resource": "arn:aws:ec2:*:*:instance/*",
+      "Condition": {
+        "StringNotEquals": {
+          "ec2:InstanceType": [
+            "t4g.small",
+            "t4g.medium",
+            "t4g.large",
+            "c7g.xlarge"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DenyInstanceAttributeMutation",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:ModifyInstanceAttribute"
+      ],
+      "Resource": "arn:aws:ec2:*:*:instance/*"
+    },
+    {
+      "Sid": "DenyRdsCreateWithoutManagedMasterPassword",
+      "Effect": "Deny",
+      "Action": [
+        "rds:CreateDBInstance"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "BoolIfExists": {
+          "rds:ManageMasterUserPassword": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyRdsCreatePubliclyAccessible",
+      "Effect": "Deny",
+      "Action": [
+        "rds:CreateDBInstance",
+        "rds:RestoreDBInstanceFromDBSnapshot"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "BoolIfExists": {
+          "rds:PubliclyAccessible": "true"
+        }
+      }
+    },
+    {
+      "Sid": "DenyRdsModifyToPubliclyAccessible",
+      "Effect": "Deny",
+      "Action": [
+        "rds:ModifyDBInstance"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "Bool": {
+          "rds:PubliclyAccessible": "true"
+        }
+      }
+    },
+    {
+      "Sid": "DenyAuroraClusters",
+      "Effect": "Deny",
+      "Action": [
+        "rds:CreateDBCluster",
+        "rds:RestoreDBClusterFromSnapshot",
+        "rds:RestoreDBClusterToPointInTime"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyDetectiveControlTampering",
+      "Effect": "Deny",
+      "Action": [
+        "cloudtrail:StopLogging",
+        "cloudtrail:DeleteTrail",
+        "cloudtrail:UpdateTrail",
+        "cloudtrail:PutEventSelectors",
+        "cloudtrail:PutInsightSelectors",
+        "guardduty:DeleteDetector",
+        "guardduty:UpdateDetector",
+        "guardduty:DeleteMembers",
+        "guardduty:DisassociateFromAdministratorAccount",
+        "guardduty:DisassociateMembers",
+        "guardduty:DeletePublishingDestination",
+        "guardduty:UpdatePublishingDestination",
+        "guardduty:StopMonitoringMembers"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyTrailEvidenceDestruction",
+      "Effect": "Deny",
+      "Action": [
+        "s3:DeleteBucket",
+        "s3:DeleteObject",
+        "s3:DeleteObjectVersion",
+        "s3:DeleteBucketPolicy",
+        "s3:PutLifecycleConfiguration"
+      ],
+      "Resource": [
+        "arn:aws:s3:::rockcyber-mlops-toxic-cloudtrail-*",
+        "arn:aws:s3:::rockcyber-mlops-toxic-cloudtrail-*/*"
+      ]
+    },
+    {
+      "Sid": "DenyStaticCredentialCreation",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateUser",
+        "iam:CreateAccessKey",
+        "iam:UpdateAccessKey",
+        "iam:CreateLoginProfile",
+        "iam:UpdateLoginProfile",
+        "iam:CreateServiceSpecificCredential"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyOrganizationEscape",
+      "Effect": "Deny",
+      "Action": [
+        "organizations:LeaveOrganization",
+        "account:CloseAccount"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
