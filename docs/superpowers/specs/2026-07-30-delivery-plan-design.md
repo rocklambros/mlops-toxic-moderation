@@ -266,10 +266,10 @@ Verify each in a logged-out browser before submitting.
 
 Capture the screenshots and the reachability check while the stack is up. Do not stop the stack until they are done.
 
-**Open interpretive questions to resolve with the instructor** — five minutes, and they de-risk the two largest topology and evidence decisions:
+**Interpretive questions — ANSWERED BY THE INSTRUCTOR, 2026-07-31.** Both were the largest topology and evidence bets in the plan. Both are now requirements rather than readings, and both confirm the choices already made.
 
-1. Does the monitoring dashboard need its own EC2 separate from *both* the backend and the frontend, or only from the frontend?
-2. Does a public W&B project satisfy the "Model Registry" requirement, or must the registry page itself be visible?
+1. **The monitoring dashboard needs its own EC2, separate from both the backend and the frontend.** The three-instance topology is therefore mandatory, not a conservative reading of 5.1/5.2/3.2. A two-instance deployment would fail the requirement outright. This retires the risk that Phase A2 could be built from the older two-instance table.
+2. **The Registry page itself must be visible** — a public W&B *project* showing runs does not satisfy rubric 1.3. The graded evidence is the Registry page, logged out, showing a promoted stage. This confirms the owner decision of 2026-07-31 and makes the white-box evasion exposure in §13 a required trade rather than an elective one.
 
 ## 13. Accepted residual risk
 

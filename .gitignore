@@ -62,3 +62,10 @@ htmlcov/
 .idea/
 .vscode/
 *.swp
+
+# Python virtualenvs
+.venv/
+.venv-lock/
+
+# Raw dataset, fetched by scripts/fetch_jigsaw.sh, never committed
+data/raw/

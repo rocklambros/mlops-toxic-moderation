@@ -102,8 +102,28 @@ LABELS: tuple[str, ...] = (
 )
 ```
 
+**Text normalization (Phase 0 → Phase 1/2). Two functions, deliberately different.**
+```python
+# model/normalize.py
+def normalize(text: str) -> str: ...
+# FROZEN corpus normalizer: NFKC + casefold + whitespace collapse. Dedup, the leakage
+# gate, and split_version all depend on it. Changing it moves the locked test set.
+
+def normalize_for_serving(text: str) -> str: ...
+# Serving normalizer: normalize() plus confusable/homoglyph folding, combining-mark
+# stripping, and a MAX_INPUT_CHARS cap. Never imported by model/data/dedup.py.
+```
+
 **Dataset preparation (Phase 0 → Phase 1).**
 ```python
+# model/data/split.py
+def make_splits(
+    df: "pd.DataFrame",
+    seed: int,
+    test_size: float = 0.15,
+    n_folds: int = 5,
+) -> tuple["pd.DataFrame", "pd.DataFrame", list[tuple["np.ndarray", "np.ndarray"]]]: ...
+
 # model/data/prepare.py
 @dataclass(frozen=True)
 class SplitConfig:
@@ -111,14 +131,19 @@ class SplitConfig:
     test_size: float = 0.15
     n_folds: int = 5
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class DatasetBundle:
-    train_df: "pd.DataFrame"          # deduped, contains comment_text + 6 label columns
-    test_df: "pd.DataFrame"           # locked 15% held-out
-    fold_indices: list[tuple["np.ndarray", "np.ndarray"]]  # (train_idx, val_idx) into train_df
-    data_version: str                 # sha256 over sorted deduped ids + config
+    train_df: "pd.DataFrame"
+    test_df: "pd.DataFrame"
+    fold_indices: list[tuple["np.ndarray", "np.ndarray"]]
+    raw_sha256: str
+    split_version: str
+    env_version: str
+    config: SplitConfig = field(default_factory=SplitConfig)
 
-def prepare_dataset(raw_csv: "Path", config: SplitConfig) -> DatasetBundle: ...
+DEFAULT_SPLIT = SplitConfig()
+
+def prepare_dataset(raw_csv: "Path", config: SplitConfig = DEFAULT_SPLIT) -> DatasetBundle: ...
 ```
 
 **Model interface (Phase 1 produces artifacts; Phase 2/Phase 3 load).**
@@ -155,17 +180,20 @@ def decide(probs: dict[str, float], thresholds: dict[str, float]) -> DecisionRes
 **Output contract (Phase 0 defines; Phase 2 returns; Phase 3 consumes).**
 ```python
 # model/contract.py  (pydantic)
+def probs_to_dict(row: "np.ndarray") -> dict[str, float]: ...
+def enforce_hierarchy(probs: dict[str, float]) -> dict[str, float]: ...
+
 class LabelScore(BaseModel):
-    prob: float
+    prob: float = Field(ge=0.0, le=1.0)
     flag: bool
 
 class PredictionResponse(BaseModel):
     request_id: str
     model_version: str
-    labels: dict[str, LabelScore]     # keys == LABELS
-    decision: str                     # "allow" | "review" | "block"
-    max_prob: float
-    latency_ms: int
+    labels: dict[str, LabelScore]
+    decision: Literal["allow", "review", "block"]
+    max_prob: float = Field(ge=0.0, le=1.0)
+    latency_ms: int = Field(ge=0)
 ```
 
 **Database writes (Phase 2 defines; Phase 3 consumes).**
@@ -233,7 +261,7 @@ Each phase produces a working, testable increment and lands on its own feature b
 
 **Deliverable:** A reproducible offline data pipeline that turns raw Jigsaw into deduplicated, iteratively-stratified, locked splits with a `data_version` hash, plus the label constants, the output contract types, seed-hygiene utilities, and an executable firewall gate. No cloud, no model training. Runs and tests fully on a laptop against a small synthetic fixture.
 
-**Branch:** `feat/phase-0-data-firewall`. **Detailed plan:** `docs/superpowers/plans/2026-07-01-phase-0-data-firewall.md`.
+**Branch:** `feat/phase-0-data-firewall`. **Detailed plan:** `docs/superpowers/plans/2026-07-31-phase-0-data-firewall-v2.md`.
 
 **Files:** `pyproject.toml`, `requirements/base.txt`, `requirements/dev.txt`, `model/labels.py`, `model/contract.py`, `model/seeds.py`, `model/data/{load,dedup,split,prepare,firewall_check}.py`, `tests/unit/test_*`, `tests/fixtures/mini_jigsaw.csv`, `Makefile`.
 
@@ -243,13 +271,13 @@ Each phase produces a working, testable increment and lands on its own feature b
 1. Project scaffold: `pyproject.toml` (ruff + pytest config), pinned `requirements/base.txt` + `requirements/dev.txt`, package skeleton with `__init__.py`, `Makefile` targets (`lint`, `test`, `data`), `.env.example`. Test: `ruff check` clean, `pytest` collects.
 2. `model/labels.py`: ordered `LABELS` tuple. Test: length 6, exact order, immutability.
 3. `model/data/load.py`: `load_raw(csv) -> DataFrame`, validates the `id` + `comment_text` + six label columns, rejects nulls in labels and values outside {0,1}. Test against `mini_jigsaw.csv` and a malformed fixture.
-4. `model/data/dedup.py`: `dedup(df) -> DataFrame` runs before any split. Normalize text (NFKC, lowercase, collapse whitespace) then drop exact-normalized duplicates; near-duplicate collapse via MinHash LSH (datasketch) over char shingles with a documented Jaccard threshold. Deterministic. Test: known duplicates and near-duplicates collapse, distinct rows survive, dedup is idempotent.
-5. `model/data/split.py`: `make_splits(df, config) -> (train_df, test_df, fold_indices)` using `MultilabelStratifiedShuffleSplit` for the locked 15% test and `MultilabelStratifiedKFold` for folds. Test: every label including `threat` present in test and every fold; test size ~15%; same seed reproduces identical ids; no id overlaps train and test.
+4. `model/data/dedup.py`: `dedup(df) -> DataFrame` runs before any split, in **two stages**. Stage 1 collapses exact `normalize()`d duplicates. Stage 2 is MinHash **LSH blocking only** — banding passed explicitly as `params=(LSH_BANDS=16, LSH_ROWS=6)`, never via `threshold=`, because datasketch's auto-tuner resolves `threshold=0.80` to `b=9, r=13` whose recall at J=0.80 is 0.399 — followed by **exact char-shingle Jaccard verification** against `DEDUP_JACCARD = 0.80`. LSH nominates; exact Jaccard decides. Labels are OR-reconciled across each collapsed group and the survivor is `min()` over the verified candidate ids, never `hits[0]` (`MinHashLSH.query` returns `list(set(...))`, whose order varies with `PYTHONHASHSEED`). Test: known duplicates and near-duplicates collapse, distinct rows survive, dedup is idempotent and row-order independent, and `lsh_recall(0.80) >= 0.99`.
+5. `model/data/split.py`: `make_splits(df, seed, test_size=0.15, n_folds=5) -> (train_df, test_df, fold_indices)` using `MultilabelStratifiedShuffleSplit` for the locked 15% test and `MultilabelStratifiedKFold` for folds. The seed is a positional argument, not a config object, so the split tests are **parametrized over five seeds** rather than passing at the one seed they were written against. Test, at every seed: every label including `threat` present in test and in every fold; test size ~15%; same seed reproduces identical ids; no id overlaps train and test.
 6. `model/seeds.py`: `set_all_seeds(seed)` (random, numpy, torch guarded, PYTHONHASHSEED note), `run_metadata()` returns git SHA + seed + timestamp. Test: seeded RNG determinism; metadata carries a git SHA.
 7. `model/contract.py`: pydantic `LabelScore`, `PredictionResponse` with a validator that `labels` keys equal `LABELS` and `decision` is one of allow/review/block. Test: the spec example JSON validates; wrong decision and wrong label keys are rejected.
-8. `model/data/prepare.py` + `model/data/firewall_check.py`: `prepare_dataset()` wires load → dedup → split and computes `data_version`; `assert_no_leakage(bundle)` asserts no train/test id overlap and no cross-split near-dup. `Makefile` `data` target runs prepare then the firewall check. Test: `prepare_dataset` is deterministic (same `data_version` twice); firewall check passes on clean data and raises on an injected leak.
+8. `model/data/prepare.py` + `model/data/firewall_check.py`: `prepare_dataset()` wires load → dedup → split and computes **three separate version fields** — `raw_sha256` (the bytes of the CSV as delivered), `split_version` (the realized train/test/fold membership plus the per-id label fingerprint and the `SplitConfig`), and `env_version` (pinned library versions plus the dedup and normalizer parameters). One string could not say whether the corpus, the split, or the environment moved; all three are logged to W&B separately and `data_version` survives only as a derived composite property for single-string display. `assert_no_leakage(bundle)` asserts no train/test id overlap, no exact-text leak, and no cross-split near-duplicate — and is **independent of dedup by construction**, deciding on exact Jaccard at `GATE_JACCARD = 0.70`, strictly below `DEDUP_JACCARD = 0.80`, so it can catch the band dedup deliberately leaves. `Makefile` `data` target runs prepare then the firewall check. Test: all three version fields are stable across repeat runs and each moves only for its own cause; the gate passes on clean data and raises on an injected leak.
 
-**Test strategy:** Pure unit tests against a committed synthetic `mini_jigsaw.csv` (about 60 rows, all six labels represented, a few planted duplicates and near-duplicates). No network. Determinism asserted by running prepare twice and comparing `data_version`.
+**Test strategy:** Pure unit tests against a committed synthetic `mini_jigsaw.csv` (68 rows, all six labels represented, four planted duplicates and near-duplicates). No network. Determinism asserted by running prepare twice and comparing `data_version`.
 
 **Exit criteria:** `make data` produces an identical `data_version` on repeat runs; `assert_no_leakage` passes; every Phase 0 test green; `ruff check` clean; merged via PR.
 
