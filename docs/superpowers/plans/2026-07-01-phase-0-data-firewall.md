@@ -101,7 +101,7 @@ addopts = "-q"
 markers = ["integration: needs external services (deselect with -m 'not integration')"]
 ```
 
-`requirements/base.txt` (exact pins; regenerate a hashed lock with pip-compile before Phase 4):
+`requirements/base.txt` (exact pins; a hashed lock — `pip-compile --generate-hashes` installed with `--require-hashes` — is generated before Phase 1, i.e. before ANY install on the credential-bearing Jetson, not deferred to Phase 4):
 ```
 numpy==2.1.3
 pandas==2.2.3
@@ -122,13 +122,19 @@ ruff==0.7.4
 
 `Makefile` (tabs, not spaces, for recipe lines):
 ```makefile
-.PHONY: lint test data
+.PHONY: venv lint test data
+PY ?= python3.11          # the build box default `python` is 3.12; pin 3.11 to match requires-python
+VENV ?= .venv
+BIN := $(VENV)/bin
+venv:
+	$(PY) -m venv $(VENV)
+	$(BIN)/python -m pip install -r requirements/dev.txt
 lint:
-	ruff check .
+	$(BIN)/ruff check .
 test:
-	PYTHONHASHSEED=0 pytest -m "not integration"
+	PYTHONHASHSEED=0 $(BIN)/pytest -m "not integration"
 data:
-	PYTHONHASHSEED=0 python -m model.data.run --csv tests/fixtures/mini_jigsaw.csv
+	PYTHONHASHSEED=0 $(BIN)/python -m model.data.run --csv tests/fixtures/mini_jigsaw.csv
 ```
 
 `.env.example`:
@@ -141,7 +147,7 @@ Create empty `model/__init__.py`, `model/data/__init__.py`, `tests/__init__.py`,
 
 - [ ] **Step 4: Install deps and verify test passes**
 
-Run: `python -m pip install -r requirements/dev.txt && pytest tests/unit/test_imports.py -v && ruff check .`
+Run: `make venv && PYTHONHASHSEED=0 .venv/bin/pytest tests/unit/test_imports.py -v && .venv/bin/ruff check .`  (the venv pins the interpreter to 3.11 to match `requires-python`; the build box default `python` resolves to 3.12)
 Expected: test PASS, ruff reports no errors.
 
 - [ ] **Step 5: Commit**
@@ -273,12 +279,21 @@ BASE: list[tuple[str, set[str]]] = [
     ("your kind does not belong here", {"toxic", "identity_hate"}),
     ("slur against your ethnicity", {"toxic", "identity_hate", "severe_toxic"}),
     ("you vile disgusting worthless scum", {"toxic", "severe_toxic", "insult"}),
+    ("stop threatening me or i will end this now", {"toxic", "threat"}),
+    ("i know where you live and i am coming for you", {"toxic", "threat"}),
 ]
 
-# Planted duplicate and near-duplicate of row index 5.
+# Planted duplicates/near-duplicates of the "you are an idiot" row (index 5), plus one
+# label-conflicting duplicate. The first two collapse at the exact-normalized step; the
+# third survives normalization but has Jaccard > 0.9 over char 5-shingles, so it exercises
+# the MinHash-LSH branch that the old fixture never touched; the fourth is an exact-normalized
+# duplicate of "i will kill you" that DISAGREES on a label, to prove dedup reconciles labels
+# by OR instead of dropping the positive with a "keep-first" copy.
 PLANTS: list[tuple[str, set[str]]] = [
-    ("you are an idiot", {"toxic", "insult"}),          # exact duplicate
-    ("You  are an   IDIOT", {"toxic", "insult"}),       # near-duplicate (case + whitespace)
+    ("you are an idiot", {"toxic", "insult"}),           # exact-normalized duplicate
+    ("You  are an   IDIOT", {"toxic", "insult"}),        # case + whitespace -> exact after normalize
+    ("you are an idiot!", {"toxic", "insult"}),          # true near-duplicate -> caught by MinHash LSH
+    ("i will kill you", {"toxic", "threat", "severe_toxic", "insult"}),  # dup of c017 with an extra label
 ]
 
 
@@ -309,7 +324,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: Generate the fixture and write its verification test**
 
 Run: `touch tests/fixtures/__init__.py && python tests/fixtures/make_mini.py`
-Expected: `wrote 32 rows to .../mini_jigsaw.csv`
+Expected: `wrote 36 rows to .../mini_jigsaw.csv`
 
 `tests/unit/test_fixture.py`:
 ```python
@@ -369,7 +384,7 @@ FIXTURE = Path("tests/fixtures/mini_jigsaw.csv")
 def test_load_raw_returns_required_columns():
     df = load_raw(FIXTURE)
     assert list(df.columns) == ["id", "comment_text", *LABELS]
-    assert len(df) == 32
+    assert len(df) == 36
 
 
 def test_load_raw_rejects_missing_column(tmp_path):
@@ -464,13 +479,25 @@ def test_normalize_collapses_case_and_whitespace():
     assert normalize("You  are an   IDIOT") == "you are an idiot"
 
 
-def test_dedup_removes_exact_and_near_duplicates():
+def test_dedup_collapses_exact_and_near_duplicates_and_reconciles_labels():
     df = load_raw(FIXTURE)
     out = dedup(df)
-    # The fixture plants one exact and one near-duplicate of "you are an idiot".
-    assert len(out) == len(df) - 2
-    texts = [normalize(t) for t in out["comment_text"]]
-    assert texts.count("you are an idiot") == 1
+    # Four planted rows collapse: two exact-normalized, one MinHash near-duplicate
+    # ("you are an idiot!"), and one exact duplicate that carried a conflicting label.
+    assert len(out) == len(df) - 4
+    norm = [normalize(t) for t in out["comment_text"]]
+    assert norm.count("you are an idiot") == 1      # exact + case/whitespace + near-dup all collapsed
+    assert "you are an idiot!" not in norm          # the near-duplicate was removed by the LSH branch
+    # Label reconciliation: the "i will kill you" duplicate added an 'insult' label -> OR keeps it.
+    merged = out[out["comment_text"].map(normalize) == "i will kill you"].iloc[0]
+    assert merged["insult"] == 1 and merged["threat"] == 1
+
+
+def test_dedup_keeps_distinct_low_similarity_rows():
+    df = load_raw(FIXTURE)
+    out = dedup(df)
+    # A semantically different comment must survive (dedup must not over-collapse).
+    assert any(normalize(t) == "have a nice day friend" for t in out["comment_text"])
 
 
 def test_dedup_is_idempotent():
@@ -489,13 +516,23 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'model.data.dedup'`
 
 `model/data/dedup.py`:
 ```python
-"""Deterministic near-duplicate dedup. Runs before any split (leakage firewall)."""
+"""Deterministic near-duplicate dedup. Runs before any split (leakage firewall).
+
+threshold=0.9 over char 5-shingles catches near-verbatim reposts (trailing edits, minor
+additions). It does NOT catch heavy paraphrase or single-character obfuscation (e.g.
+"idi0t"), which fall below 0.9 over char shingles; those are handled at serving time by
+input normalization and the threshold is tuned against a manual near-duplicate audit on the
+real Jigsaw corpus in Phase 1. Labels are reconciled by OR across every collapsed group so a
+rare-label positive (e.g. `threat`) is never discarded with a duplicate copy.
+"""
 
 import re
 import unicodedata
 
 import pandas as pd
 from datasketch import MinHash, MinHashLSH
+
+from model.labels import LABELS
 
 _WS = re.compile(r"\s+")
 
@@ -521,22 +558,37 @@ def _minhash(text: str, num_perm: int) -> MinHash:
 def dedup(df: pd.DataFrame, threshold: float = 0.9, num_perm: int = 64) -> pd.DataFrame:
     work = df.copy()
     work["_norm"] = work["comment_text"].map(normalize)
-    # Exact-normalized dedup first; sort by id so "keep first" is deterministic.
-    work = work.sort_values("id").drop_duplicates("_norm", keep="first")
-    # Near-duplicate collapse via MinHash LSH over char shingles.
+    work = work.sort_values("id").reset_index(drop=True)
+
+    # Pass 1: exact-normalized collapse. OR the six labels across each duplicate group so a
+    # positive is never dropped with a "keep-first" copy; keep the lowest id and its text.
+    def _merge_exact(group: pd.DataFrame) -> dict:
+        head = group.iloc[0]
+        row = {"id": head["id"], "comment_text": head["comment_text"], "_norm": head["_norm"]}
+        for label in LABELS:
+            row[label] = int(group[label].max())
+        return row
+
+    exact = pd.DataFrame([_merge_exact(g) for _, g in work.groupby("_norm", sort=False)])
+    exact = exact.sort_values("id").reset_index(drop=True)
+
+    # Pass 2: near-duplicate collapse via MinHash LSH over char shingles. OR a near-duplicate's
+    # labels into the representative row already kept, rather than silently dropping it.
     lsh = MinHashLSH(threshold=threshold, num_perm=num_perm)
-    keep_ids: list[str] = []
-    for row_id, norm in zip(work["id"], work["_norm"], strict=True):
-        m = _minhash(norm, num_perm)
-        if lsh.query(m):
-            continue  # near-duplicate of a row already kept
-        lsh.insert(str(row_id), m)
-        keep_ids.append(row_id)
-    return (
-        work[work["id"].isin(keep_ids)]
-        .drop(columns="_norm")
-        .reset_index(drop=True)
-    )
+    kept: list[dict] = []
+    index_of: dict[str, int] = {}
+    for _, row in exact.iterrows():
+        m = _minhash(row["_norm"], num_perm)
+        hits = lsh.query(m)
+        if hits:
+            rep = index_of[hits[0]]
+            for label in LABELS:
+                kept[rep][label] = int(max(kept[rep][label], row[label]))
+            continue
+        lsh.insert(str(row["id"]), m)
+        index_of[str(row["id"])] = len(kept)
+        kept.append(row.to_dict())
+    return pd.DataFrame(kept).drop(columns="_norm").reset_index(drop=True)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -708,13 +760,13 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'model.seeds'`
 ```python
 """Seed hygiene and reproducibility metadata.
 
-Note: PYTHONHASHSEED is read by the interpreter at startup, so setting it here
-records intent but does not change the current process. The Makefile sets it in
-the environment for real determinism.
+PYTHONHASHSEED must be set in the environment BEFORE the interpreter starts, so setting it
+from Python is a no-op for the running process. The Makefile owns it (PYTHONHASHSEED=0 for
+`make test`/`make data`) as the single source of truth; set_all_seeds deliberately does not
+touch it, to avoid a second, conflicting "seed" value.
 """
 
 import datetime as dt
-import os
 import random
 import subprocess
 
@@ -722,7 +774,6 @@ import numpy as np
 
 
 def set_all_seeds(seed: int) -> None:
-    os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
     np.random.seed(seed)
     try:
@@ -898,6 +949,20 @@ def test_data_version_changes_with_seed():
     a = prepare_dataset(FIXTURE, SplitConfig(seed=42, n_folds=5))
     b = prepare_dataset(FIXTURE, SplitConfig(seed=7, n_folds=5))
     assert a.data_version != b.data_version
+
+
+def test_data_version_changes_when_a_label_flips(tmp_path):
+    import pandas as pd
+
+    from model.data.load import REQUIRED_COLUMNS
+
+    a = prepare_dataset(FIXTURE, SplitConfig(seed=42, n_folds=5))
+    df = pd.read_csv(FIXTURE)
+    df.loc[0, "toxic"] = 1 - int(df.loc[0, "toxic"])  # flip one label on one row
+    relabeled = tmp_path / "relabeled.csv"
+    df[list(REQUIRED_COLUMNS)].to_csv(relabeled, index=False)
+    b = prepare_dataset(relabeled, SplitConfig(seed=42, n_folds=5))
+    assert a.data_version != b.data_version
 ```
 
 `tests/unit/test_firewall.py`:
@@ -927,6 +992,30 @@ def test_injected_id_overlap_is_caught():
     )
     with pytest.raises(AssertionError, match="overlap"):
         assert_no_leakage(leaked)
+
+
+def test_injected_near_duplicate_leak_is_caught():
+    import pandas as pd
+
+    bundle = prepare_dataset(FIXTURE, SplitConfig(seed=42, n_folds=5))
+    # A near-duplicate (not exact) of the longest train comment, added to the test set under a
+    # fresh id: shares no id and is not an exact-normalized match, so only the MinHash check
+    # can catch it.
+    src = max(bundle.train_df["comment_text"], key=len)
+    new_row = bundle.test_df.iloc[0].copy()
+    new_row["id"] = "leak_row"
+    new_row["comment_text"] = src + "!"
+    test_leaked = pd.concat(
+        [bundle.test_df, new_row.to_frame().T], ignore_index=True
+    )
+    leaked = DatasetBundle(
+        train_df=bundle.train_df,
+        test_df=test_leaked,
+        fold_indices=bundle.fold_indices,
+        data_version=bundle.data_version,
+    )
+    with pytest.raises(AssertionError, match="near-duplicate"):
+        assert_no_leakage(leaked)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -943,6 +1032,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'model.data.prepare'`
 import hashlib
 import json
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import numpy as np
@@ -951,6 +1041,7 @@ import pandas as pd
 from model.data.dedup import dedup
 from model.data.load import load_raw
 from model.data.split import make_splits
+from model.labels import LABELS
 
 
 @dataclass(frozen=True)
@@ -968,14 +1059,45 @@ class DatasetBundle:
     data_version: str
 
 
-def _data_version(deduped: pd.DataFrame, config: SplitConfig) -> str:
-    ids = sorted(str(x) for x in deduped["id"].tolist())
+def _pkg_version(name: str) -> str:
+    try:
+        return version(name)
+    except PackageNotFoundError:
+        return "unknown"
+
+
+def _label_fingerprint(df: pd.DataFrame) -> list[list[str]]:
+    # Order-independent (id, label-vector) fingerprint so a relabel changes the hash.
+    return sorted(
+        [str(row["id"]), "".join(str(int(row[label])) for label in LABELS)]
+        for _, row in df.iterrows()
+    )
+
+
+def _data_version(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    folds: list[tuple[np.ndarray, np.ndarray]],
+    config: SplitConfig,
+) -> str:
+    # Hash the REALIZED split (train/test/fold membership) + label content + the versions of
+    # the libraries that determine the split for a given seed. Hashing only the surviving id
+    # set (the old behaviour) collides when labels change or a split library is bumped.
     payload = json.dumps(
         {
-            "ids": ids,
-            "seed": config.seed,
-            "test_size": config.test_size,
-            "n_folds": config.n_folds,
+            "train": _label_fingerprint(train_df),
+            "test": _label_fingerprint(test_df),
+            "folds": [sorted(int(i) for i in val_idx) for _, val_idx in folds],
+            "config": {
+                "seed": config.seed,
+                "test_size": config.test_size,
+                "n_folds": config.n_folds,
+            },
+            "versions": {
+                "numpy": np.__version__,
+                "scikit-learn": _pkg_version("scikit-learn"),
+                "iterative-stratification": _pkg_version("iterative-stratification"),
+            },
         },
         sort_keys=True,
     )
@@ -984,13 +1106,13 @@ def _data_version(deduped: pd.DataFrame, config: SplitConfig) -> str:
 
 def prepare_dataset(raw_csv: Path, config: SplitConfig = SplitConfig()) -> DatasetBundle:
     deduped = dedup(load_raw(raw_csv))
-    version = _data_version(deduped, config)
     train_df, test_df, folds = make_splits(
         deduped,
         seed=config.seed,
         test_size=config.test_size,
         n_folds=config.n_folds,
     )
+    version = _data_version(train_df, test_df, folds, config)
     return DatasetBundle(train_df, test_df, folds, version)
 ```
 
@@ -998,11 +1120,15 @@ def prepare_dataset(raw_csv: Path, config: SplitConfig = SplitConfig()) -> Datas
 ```python
 """Executable leakage-firewall gate. Fails loudly on any train/test contamination."""
 
-from model.data.dedup import normalize
+from datasketch import MinHashLSH
+
+from model.data.dedup import _minhash, normalize
 from model.data.prepare import DatasetBundle
 
 
-def assert_no_leakage(bundle: DatasetBundle) -> None:
+def assert_no_leakage(
+    bundle: DatasetBundle, threshold: float = 0.9, num_perm: int = 64
+) -> None:
     train_ids = set(bundle.train_df["id"])
     test_ids = set(bundle.test_df["id"])
     overlap = train_ids & test_ids
@@ -1014,6 +1140,20 @@ def assert_no_leakage(bundle: DatasetBundle) -> None:
     text_leak = train_norm & test_norm
     if text_leak:
         raise AssertionError(f"normalized text leak across split: {len(text_leak)} rows")
+
+    # Near-duplicate leak across the split — the class of contamination dedup exists to stop.
+    # Verify it, do not assume dedup caught it: a residual near-dup here inflates the held-out
+    # score, which is the exact failure the firewall is meant to make impossible.
+    lsh = MinHashLSH(threshold=threshold, num_perm=num_perm)
+    for tid, text in zip(bundle.train_df["id"], bundle.train_df["comment_text"], strict=True):
+        lsh.insert(f"train::{tid}", _minhash(normalize(text), num_perm))
+    near = [
+        sid
+        for sid, text in zip(bundle.test_df["id"], bundle.test_df["comment_text"], strict=True)
+        if lsh.query(_minhash(normalize(text), num_perm))
+    ]
+    if near:
+        raise AssertionError(f"near-duplicate leak across split: {len(near)} test rows")
 ```
 
 `model/data/run.py`:
@@ -1084,7 +1224,7 @@ gh pr create --base main --title "Phase 0: data pipeline and leakage firewall" \
 
 ## Self-Review
 
-**Spec coverage (spec section 6, the firewall):** near-dup dedup before split (Task 5), locked 15% test with fixed seed and iterative multi-label stratification (Task 6), every label in every fold (Task 6 test), determinism / seed hygiene + git SHA (Tasks 6, 7, 9), executable firewall gate (Task 9). TF-IDF-inside-CV is a Phase 1 obligation, noted in the master roadmap. Output contract (spec section 5) is Task 8.
+**Spec coverage (spec section 6, the firewall):** near-dup dedup before split with label-OR reconciliation and an exercised MinHash branch (Task 5), locked 15% test with fixed seed and iterative multi-label stratification (Task 6), every label in every fold (Task 6 test), determinism / seed hygiene + git SHA, with `data_version` fingerprinting the realized split + label content + split-library versions (Tasks 6, 7, 9), executable firewall gate that verifies id-overlap, exact-normalized, AND cross-split near-duplicate contamination (Task 9). TF-IDF-inside-CV is a Phase 1 obligation, noted in the master roadmap. Output contract (spec section 5) is Task 8.
 
 **Placeholder scan:** every step carries real code and an exact command. No TODO, no "handle edge cases," no "similar to."
 
