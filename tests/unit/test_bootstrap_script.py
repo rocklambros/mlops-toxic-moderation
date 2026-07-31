@@ -222,6 +222,15 @@ def identity_fixtures(stub):
         "organizations_describe-organization",
         '{"Organization":{"Id":"o-abc","MasterAccountId":"111111111111"}}',
     )
+    # Preflight now verifies Organizations trusted access for account.amazonaws.com, without
+    # which step 6's PutAlternateContact fails AFTER CreateAccount has already run. The
+    # baseline replays it as already enabled; the test that exercises the missing case
+    # overrides this fixture.
+    stub.fixture(
+        "organizations_list-aws-service-access-for-organization",
+        '{"EnabledServicePrincipals":[{"ServicePrincipal":"account.amazonaws.com"},'
+        '{"ServicePrincipal":"sso.amazonaws.com"}]}',
+    )
 
 
 def scp_content_fixture(stub):
@@ -985,3 +994,57 @@ def test_the_state_bucket_is_created_private_versioned_and_encrypted_when_absent
         assert f"s3api_{operation}" in calls
     assert "LocationConstraint=us-west-2" in stub.call_args("s3api_create-bucket")
     assert "aws:SecureTransport" in stub.call_args("s3api_put-bucket-policy")
+
+
+def test_initial_provisioning_is_not_attempted_with_provision_permission_set():
+    """ProvisionPermissionSet RE-provisions an existing provision after a policy change.
+    It cannot create the first one -- AWS returns "Permission set provision not found in
+    AWS account". Initial provisioning is a side effect of CreateAccountAssignment.
+
+    Calling it in the create branch produced two alarming ResourceNotFoundException lines
+    on the live bootstrap that looked like a failure and were merely noise. Worse, the call
+    sat inside the create-only branch, so a re-run could never have healed anything even if
+    the call had been correct.
+
+    MlopsToxicReadOnly is unassigned by design (foundation spec 4.3), so it has no
+    provision to re-provision and never will until someone assigns it.
+    """
+    src = BOOT.read_text()
+    assert "provision-permission-set" not in src, (
+        "ProvisionPermissionSet cannot perform initial provisioning; "
+        "CreateAccountAssignment is what provisions a permission set to an account"
+    )
+
+
+def test_preflight_checks_account_management_trusted_access():
+    """account:PutAlternateContact on a MEMBER account requires Organizations trusted
+    access for account.amazonaws.com. Nothing enabled it, so step 6 died with
+    AccessDeniedException after the account had already been created -- the most expensive
+    possible place to discover a missing prerequisite, since CreateAccount has no undo.
+
+    It is also a second organization-wide write, and the script's blast-radius accounting
+    names only one (step 2). Preflight must surface it before anything irreversible runs.
+    """
+    src = BOOT.read_text()
+    assert "account.amazonaws.com" in src, (
+        "preflight does not check Account Management trusted access"
+    )
+    assert "enable-aws-service-access" in src or "list-aws-service-access-for-organization" in src
+
+
+def test_preflight_refuses_when_account_management_trusted_access_is_missing(stub):
+    """The failure this check exists to prevent cost a live bootstrap: step 6 died with
+    AccessDeniedException on PutAlternateContact AFTER organizations:CreateAccount had
+    already created an account that cannot be deleted and whose email is locked for 90
+    days. Preflight must refuse before anything irreversible runs.
+    """
+    identity_fixtures(stub)
+    stub.fixture(
+        "organizations_list-aws-service-access-for-organization",
+        '{"EnabledServicePrincipals":[{"ServicePrincipal":"sso.amazonaws.com"}]}',
+    )
+    result = stub.run_main()
+    assert result.returncode != 0
+    assert "account.amazonaws.com" in result.stdout + result.stderr
+    assert "organizations create-account" not in "\n".join(stub.calls()), \
+        "preflight must refuse before anything irreversible runs"
