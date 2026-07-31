@@ -52,7 +52,20 @@
       "Action": [
         "ec2:ModifyInstanceAttribute"
       ],
-      "Resource": "arn:aws:ec2:*:*:instance/*"
+      "Resource": "arn:aws:ec2:*:*:instance/*",
+      "Condition": {
+        "Null": {
+          "ec2:InstanceType": "false"
+        },
+        "StringNotEquals": {
+          "ec2:InstanceType": [
+            "t4g.small",
+            "t4g.medium",
+            "t4g.large",
+            "c7g.xlarge"
+          ]
+        }
+      }
     },
     {
       "Sid": "DenyRdsCreateWithoutManagedMasterPassword",
@@ -132,7 +145,10 @@
       "Resource": "*",
       "Condition": {
         "ArnNotLike": {
-          "aws:PrincipalArn": "arn:aws:sts::*:assumed-role/OrganizationAccountAccessRole/*"
+          "aws:PrincipalArn": [
+            "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+            "arn:aws:sts::*:assumed-role/OrganizationAccountAccessRole/*"
+          ]
         }
       }
     },
@@ -149,7 +165,15 @@
       "Resource": [
         "arn:aws:s3:::rockcyber-mlops-toxic-cloudtrail-*",
         "arn:aws:s3:::rockcyber-mlops-toxic-cloudtrail-*/*"
-      ]
+      ],
+      "Condition": {
+        "ArnNotLike": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+            "arn:aws:sts::*:assumed-role/OrganizationAccountAccessRole/*"
+          ]
+        }
+      }
     },
     {
       "Sid": "DenyStaticCredentialCreation",

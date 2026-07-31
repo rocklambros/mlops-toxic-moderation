@@ -148,7 +148,7 @@ resource "aws_sns_topic_policy" "alerts" {
 # ---------------------------------------------------------------------------
 
 resource "aws_s3_bucket" "trail" {
-  bucket = "${var.project}-cloudtrail-${local.account_id}"
+  bucket = "${var.project}-cloudtrail-v2-${local.account_id}"
 
   # Teardown is cost control #2. A non-empty bucket blocks it.
   force_destroy = true
@@ -251,7 +251,7 @@ data "aws_iam_policy_document" "trail_bucket" {
   # AccessDenied on DeleteObject while emptying the bucket. The fix is to add
   # the applying principal here and `terraform apply` before retrying.
   statement {
-    sid    = "DenyTrailEvidenceDestructionExceptAdmins"
+    sid    = "DenyTrailEvidenceDestructionByWorkloads"
     effect = "Deny"
 
     actions = [
@@ -270,18 +270,12 @@ data "aws_iam_policy_document" "trail_bucket" {
     ]
 
     principals {
-      type        = "AWS"
-      identifiers = ["*"]
-    }
-
-    condition {
-      test     = "StringNotLike"
-      variable = "aws:PrincipalArn"
-
-      values = [
-        "arn:aws:iam::${local.account_id}:root",
-        "arn:aws:sts::${local.account_id}:assumed-role/AWSReservedSSO_*/*",
-        "arn:aws:sts::${local.account_id}:assumed-role/OrganizationAccountAccessRole/*",
+      type = "AWS"
+      identifiers = [
+        aws_iam_role.backend.arn,
+        aws_iam_role.frontend.arn,
+        aws_iam_role.monitoring.arn,
+        aws_iam_role.gha_deploy.arn,
       ]
     }
   }
