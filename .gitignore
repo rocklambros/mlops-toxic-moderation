@@ -2,18 +2,18 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-.eggs/
-build/
-dist/
-.venv/
-venv/
-env/
+/.eggs/
+/build/
+/dist/
+/.venv/
+/venv/
+/env/
 
 # Environment and secrets
 .env
 *.env
 !.env.example
-secrets/
+/secrets/
 *.pem
 *.key
 
@@ -29,14 +29,20 @@ infra/aws/bootstrap-outputs.env
 # dedicated Organizations member account.
 claudedocs/mlops_final_project_requrements_aws.md
 
-# Data (raw Jigsaw dataset and derived splits are not versioned in git)
-data/
+# Data (raw Jigsaw dataset and derived splits are not versioned in git).
+# LEADING SLASH IS LOAD-BEARING: an unanchored `data/` matches any directory named
+# data at ANY depth, and silently excluded model/data/ -- the whole Phase 0 pipeline --
+# from ten commits. Tests passed locally because the files were on disk; a fresh clone
+# had no data pipeline at all.
+/data/
 *.csv
+# ...but the synthetic test fixture is a committed source artifact, not data.
+!tests/fixtures/*.csv
 *.csv.gz
 *.parquet
 
 # Model artifacts (fetched from W&B by digest at deploy time, never committed)
-artifacts/
+/artifacts/
 *.onnx
 *.skops
 *.safetensors
@@ -47,7 +53,7 @@ artifacts/
 *.pkl
 
 # Weights & Biases local run cache
-wandb/
+/wandb/
 
 # Test and lint caches
 .pytest_cache/
@@ -64,8 +70,8 @@ htmlcov/
 *.swp
 
 # Python virtualenvs
-.venv/
-.venv-lock/
+/.venv/
+/.venv-lock/
 
 # Raw dataset, fetched by scripts/fetch_jigsaw.sh, never committed
-data/raw/
+/data/raw/

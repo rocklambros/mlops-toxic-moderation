@@ -1,0 +1,69 @@
+id,comment_text,toxic,severe_toxic,obscene,threat,insult,identity_hate
+c000,have a nice day friend,0,0,0,0,0,0
+c001,thanks for the thoughtful edit,0,0,0,0,0,0
+c002,i disagree but respect your point,0,0,0,0,0,0
+c003,great work on the article,0,0,0,0,0,0
+c004,the weather is lovely today,0,0,0,0,0,0
+c005,please cite a source for that claim,0,0,0,0,0,0
+c006,i reverted the vandalism on that page,0,0,0,0,0,0
+c007,welcome to wikipedia enjoy editing,0,0,0,0,0,0
+c008,could you explain the third paragraph,0,0,0,0,0,0
+c009,the citation format needs fixing,0,0,0,0,0,0
+c010,happy to help with the translation,0,0,0,0,0,0
+c011,this article needs more references,0,0,0,0,0,0
+c012,moved the section for readability,0,0,0,0,0,0
+c013,nice catch on that typo,0,0,0,0,0,0
+c014,let us discuss this on the talk page,0,0,0,0,0,0
+c015,the infobox image is too large,0,0,0,0,0,0
+c016,you are an idiot,1,0,0,0,1,0
+c017,what a moron you are,1,0,0,0,1,0
+c018,shut up you fool,1,0,0,0,1,0
+c019,you clueless clown,1,0,0,0,1,0
+c020,absolute imbecile,1,0,0,0,1,0
+c021,you stupid loser,1,0,0,0,1,0
+c022,such a pathetic troll,1,0,0,0,1,0
+c023,get lost you halfwit,1,0,0,0,1,0
+c024,nobody cares dimwit,1,0,0,0,1,0
+c025,you write like a buffoon,1,0,0,0,1,0
+c026,what an ignorant fool,1,0,0,0,1,0
+c027,you vile disgusting worthless scum,1,1,0,0,1,0
+c028,f*ck this garbage,1,0,1,0,0,0
+c029,this is sh!t,1,0,1,0,0,0
+c030,what the hell is this crap,1,0,1,0,0,0
+c031,total bullsh1t,1,0,1,0,0,0
+c032,piece of cr@p edit,1,0,1,0,0,0
+c033,obscene filth everywhere,1,0,1,0,0,0
+c034,damn this stupid page,1,0,1,0,1,0
+c035,go to hell already,1,0,1,0,0,0
+c036,a**hole move right there,1,0,1,0,0,0
+c037,screw your dumb rules,1,0,1,0,0,0
+c038,filthy rotten trash article,1,0,1,0,0,0
+c039,utter garbage sh!te,1,1,1,0,0,0
+c040,i will kill you,1,1,0,1,0,0
+c041,i am going to hurt you,1,0,0,1,0,0
+c042,watch your back i am coming,1,0,0,1,0,0
+c043,you will pay with your life,1,1,0,1,0,0
+c044,i will find you and end you,1,1,0,1,0,0
+c045,death to you and yours,1,1,0,1,0,0
+c046,stop or i will end this now,1,0,0,1,0,0
+c047,i know where you live,1,0,0,1,0,0
+c048,expect a visit from me soon,1,0,0,1,0,0
+c049,you are a dead man walking,1,1,0,1,0,0
+c050,i will burn your house down,1,1,0,1,0,0
+c051,your family will regret this,1,0,0,1,0,0
+c052,people of that group are subhuman,1,1,0,0,0,1
+c053,i hate everyone of your race,1,0,0,0,0,1
+c054,your religion makes you worthless,1,0,0,0,0,1
+c055,go back to where you came from,1,0,0,0,0,1
+c056,your kind does not belong here,1,0,0,0,0,1
+c057,slur against your ethnicity,1,1,0,0,0,1
+c058,we should ban all of your people,1,0,0,0,0,1
+c059,that nationality ruins everything,1,0,0,0,0,1
+c060,your accent proves you are inferior,1,1,0,0,0,1
+c061,no one of your faith is welcome,1,0,0,0,0,1
+c062,deport every last one of them,1,0,0,0,0,1
+c063,your gender makes you useless here,1,1,0,0,0,1
+c064,you are an idiot,1,0,0,0,1,0
+c065,You  are an   IDIOT,1,0,0,0,1,0
+c066,you are an idiot!,1,0,0,0,1,0
+c067,i will kill you,1,1,0,1,1,0
