@@ -113,13 +113,31 @@ Every condition key below was verified against the AWS machine-readable service 
 | All regions except `us-west-2` and `us-east-1` | `aws:RequestedRegion` | Blocks resource sprawl and crypto-mining in unwatched regions. `us-east-1` stays allowed because IAM, billing, Route 53, and CloudFront endpoints live there |
 | `iam:CreateUser`, `iam:CreateAccessKey`, `iam:CreateLoginProfile` | none needed | Makes "no static credentials" an enforced property rather than a habit |
 | `ec2:RunInstances` outside the Graviton size allowlist, and all GPU and metal families | `ec2:InstanceType` | Primary cost guardrail. A single accidental GPU instance would exceed the monthly ceiling in days |
+| `ec2:ModifyInstanceAttribute`, `ec2:CreateFleet`, `ec2:RequestSpotInstances`, `ec2:RequestSpotFleet` outside the same allowlist | `ec2:InstanceType` where supported | **Added 2026-07-30.** `RunInstances` is one launch path among several. The design's own documented resize workflow is `StopInstances` + `ModifyInstanceAttribute` + `StartInstances`, which reaches any instance type without ever calling `RunInstances` — so the primary cost guardrail was bypassable by the procedure the plan itself prescribes |
 | `rds:CreateDBInstance` with a public endpoint | `rds:PubliclyAccessible` | Hard-blocks an internet-reachable database |
 | `rds:CreateDBInstance` without Secrets Manager password management | `rds:ManageMasterUserPassword` | Forces the path that keeps the password out of Terraform state |
 | `rds:CreateDBCluster` entirely | none needed | Blocks Aurora, which is where runaway RDS cost actually lives |
 | `organizations:LeaveOrganization` | none needed | Prevents the account escaping its own guardrails |
 | `cloudtrail:StopLogging`, `cloudtrail:DeleteTrail`, `guardduty:Delete*`, `guardduty:Disassociate*` | none needed | Tamper resistance on the detective controls |
 
-**Two implementation traps, both verified.**
+**The allowlist, enumerated.** It was never written down in any document, which meant the Terraform author would have derived it from the resource table above and silently omitted the classes the current topology needs.
+
+```
+t4g.small     EC2 #2, frontend
+t4g.medium    EC2 #1 backend, EC2 #3 monitoring
+t4g.large     retained headroom for EC2 #3 if the re-scorer lands
+c7g.xlarge    the sanctioned upsize target named in the master plan sizing table
+```
+
+Omitting `t4g.small` denies the frontend launch. Omitting `c7g.xlarge` denies the one resize the plan explicitly anticipates, and fixing it mid-crunch requires an SCP edit from the *management* account under a different profile. **Day-1 acceptance test: launch and immediately terminate one instance of each allowlisted class, and one of a denied class to observe the denial.**
+
+**Four implementation traps. Two were verified in the original design; two were found by premortem on 2026-07-30.**
+
+**Trap 3, key-absence semantics on the two RDS "require" statements.** This is the same class of defect as trap 2, in a different place. A deny on `Bool: {"rds:ManageMasterUserPassword": "false"}` does **not** fire when the caller simply omits the parameter, because an absent key makes the condition non-matching — so the statement fails **open** and a `random_password` in Terraform state passes. Writing it as `BoolIfExists` or adding a `Null` test instead makes it fail **closed**, denying every `CreateDBInstance` — precisely the `rds:DatabaseClass` outcome trap 2 exists to avoid. The same reasoning applies to `rds:PubliclyAccessible`, with the additional sting that RDS's own default when the key is absent is not universally `false`. Verifying that a condition key is *supported on the action* is necessary and not sufficient; its behaviour when the key is *absent* is what decides whether the guardrail works.
+
+**Trap 4, detective-control denies are incomplete.** Denying `cloudtrail:StopLogging`, `cloudtrail:DeleteTrail`, `guardduty:Delete*`, and `guardduty:Disassociate*` leaves the objective unmet. `guardduty:UpdateDetector` with `enable=false` disables GuardDuty without deleting it; `cloudtrail:UpdateTrail` redirects the trail to another bucket; `cloudtrail:PutEventSelectors` narrows it to nothing; and the trail's own S3 bucket is in-account, so `s3:DeleteObject` and `s3:PutBucketLifecycleConfiguration` destroy the evidence without touching CloudTrail at all. Add those denies, enable `enable_log_file_validation`, and restrict deletes on the trail bucket.
+
+**Two implementation traps, both verified in the original design.**
 
 `ec2:InstanceType` is a **resource-level** condition key attached to the `instance` resource of `ec2:RunInstances`, not an action-level key. The deny statement must scope `"Resource": "arn:aws:ec2:*:*:instance/*"`. Scoping it to `"*"` denies every other resource the call creates (volume, network interface, security group), because those resources carry no `ec2:InstanceType` key, so a `StringNotEquals` test evaluates true and denies the whole request. That failure mode denies all instance launches including the intended ones.
 
@@ -210,8 +228,17 @@ IMDSv2 is required on both instances, which closes the SSRF-to-credential-theft 
 
 | Resource | Spec | Notes |
 |---|---|---|
-| EC2 #1 | `t4g.medium`, AL2023 arm64 | FastAPI backend and Streamlit user and reviewer UI |
-| EC2 #2 | `t4g.large`, AL2023 arm64 | Monitoring dashboard and DistilBERT ONNX re-scorer. Confirm or resize after measuring ONNX int8 throughput |
+| EC2 #1 | `t4g.medium`, AL2023 arm64 | FastAPI backend only |
+| EC2 #2 | `t4g.small`, AL2023 arm64 | Streamlit user and reviewer UI |
+| EC2 #3 | `t4g.medium`, AL2023 arm64 | Monitoring dashboard, and the DistilBERT ONNX re-scorer if it survives the cut-line. Confirm or resize only against measured ONNX int8 throughput |
+
+**Amended 2026-07-30: three instances, not two.** The backend and the frontend are on separate instances because rubric 5.1 names "one container for the FastAPI backend, one for the frontend" and 5.2 requires deployment "to separate EC2 instances"; the monitoring dashboard is on a third because 3.2 requires it on "a different EC2 server". Two instances satisfied 3.2 on a permissive reading and left 5.1+5.2 arguable. Because the re-scorer now sits behind a cut-line, EC2 #3 no longer needs to be a `t4g.large`, so three instances are *cheaper* than the two they replace. See `docs/superpowers/specs/2026-07-30-delivery-plan-design.md` §4.
+
+Each instance gets its own security group and its own instance profile. A single `sg-app` plus a single `ec2-app-role` across all three means one compromise of the internet-facing Streamlit box yields the W&B key, the reviewer secret, and master-user read/write on every table. The monitoring dashboard additionally gets a **read-only** database role, since it only ever issues `SELECT`.
+
+**Security groups must declare explicit egress.** Terraform's `aws_security_group` removes the default `0.0.0.0/0` egress when the resource is declared without an `egress` block. An instance in that state cannot reach `ssm`, `ssmmessages`, or `ec2messages` on 443, so it never registers with Systems Manager — and because this design deliberately has no SSH, no bastion, and no NAT, the only remaining channel is the one that is broken. Egress 443 is required, and the no-SSH debug path (`aws ec2 get-console-output`, `aws ssm describe-instance-information`, EC2 Serial Console) belongs in the runbook.
+
+**Pin the AMI.** Resolving it from the SSM public parameter keeps the image current, but `deploy.yml` runs `terraform apply` unattended on every push to `main`, so a republished AL2023 image makes `ami` force replacement of all three instances — destroying baked artifacts and pulled images at an arbitrary moment, potentially mid-grading. Resolve the AMI once into a committed variable, or set `lifecycle { ignore_changes = [ami] }`, and add `paths-ignore` for `docs/**` and `**.md` so a documentation commit cannot trigger a deploy at all.
 | RDS | Postgres 16, `db.t4g.micro`, 20 GB gp3, single-AZ | `manage_master_user_password = true` |
 | ECR | 4 repositories, scan on push, immutable tags, keep last 10 | backend, frontend, monitoring, rescorer |
 
