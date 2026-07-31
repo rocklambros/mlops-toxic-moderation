@@ -180,6 +180,21 @@ preflight() {
     check_credential_hygiene || errs=1
 
     [ "$errs" -eq 0 ] || die "preflight failed"
+    # account:PutAlternateContact on a MEMBER account requires Organizations trusted access
+    # for account.amazonaws.com. Without it step 6 fails AFTER CreateAccount has already
+    # run, which is the worst place to learn a prerequisite is missing because CreateAccount
+    # has no undo. This is also a SECOND organization-wide write, so it is surfaced here
+    # rather than performed silently.
+    if ! org organizations list-aws-service-access-for-organization \
+         | jq -e '.EnabledServicePrincipals[]?|select(.ServicePrincipal=="account.amazonaws.com")' >/dev/null; then
+        if [ "${ACK_ORG_ROOT_WRITE:-0}" = "1" ]; then
+            org organizations enable-aws-service-access --service-principal account.amazonaws.com
+            log "preflight: enabled Account Management trusted access (organization-wide, acknowledged)"
+        else
+            die "preflight: Organizations trusted access for account.amazonaws.com is not enabled, so step 6 would fail after the account already exists. This is a second organization-wide write. Re-run with --ack-org-root-write."
+        fi
+    fi
+
     log "preflight passed"
 }
 
@@ -460,8 +475,12 @@ ensure_permission_set() { # instance_arn name managed_policy_arn description -> 
           | jq -r '.PermissionSet.PermissionSetArn')
     org sso-admin attach-managed-policy-to-permission-set --instance-arn "$inst" \
         --permission-set-arn "$arn" --managed-policy-arn "$policy" >/dev/null
-    org sso-admin provision-permission-set --instance-arn "$inst" --permission-set-arn "$arn" \
-        --target-id "$ACCOUNT_ID" --target-type AWS_ACCOUNT >/dev/null
+    # No ProvisionPermissionSet here. That API RE-provisions an existing provision after a
+    # policy change; it cannot create the first one, and AWS rejects the attempt with
+    # "Permission set provision not found in AWS account". Initial provisioning is a side
+    # effect of CreateAccountAssignment, which step 8 performs for MlopsToxicAdmin.
+    # MlopsToxicReadOnly is unassigned by design (foundation spec 4.3), so it correctly has
+    # no provision until someone assigns it.
     printf '%s' "$arn"
 }
 
