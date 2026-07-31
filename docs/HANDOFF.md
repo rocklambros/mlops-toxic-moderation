@@ -9,11 +9,19 @@ Where the project stands, and exactly what to do next. Update this file whenever
 
 ## Current stage
 
-**Stage B in progress. IAM Identity Center is live and the permission set is provisioned.**
+**Stage B is complete on both machines. Stage C is next, and is blocked only on code that has not been written yet.**
 
-Done as of 2026-07-30: Mac toolchain installed and verified, repository public with `SECURITY.md` and GitHub security controls enabled, IAM Identity Center enabled in `us-west-2`, user `rock.lambros` created, `AdministratorAccess` permission set created and **provisioned** to the management account.
+Done as of 2026-07-30: Mac toolchain installed and verified, repository public with `SECURITY.md` and GitHub security controls enabled, IAM Identity Center enabled in `us-west-2`, user `rock.lambros` created, `AdministratorAccess` permission set created and **provisioned** to the management account, **Jetson toolchain installed and verified (Terraform 1.15.8, AWS CLI 2.36.3)**, and **`aws configure sso` completed on the Jetson — the step 3e gate passes.**
 
-Not done: `aws configure sso` on an operator machine (step 3e), the Jetson toolchain, and every AWS resource. **No member account exists yet, no bootstrap has run, and no Terraform has been applied.**
+Verified gate on the Jetson, 2026-07-30:
+
+```
+aws sts get-caller-identity --profile rc-mgmt
+arn:aws:sts::<mgmt>:assumed-role/AWSReservedSSO_AdministratorAccess_d6c93988eb90eff1/rock.lambros
+caller account == Organization.MasterAccountId   ->  confirmed management account
+```
+
+Not done: every AWS resource. **No member account exists yet, no bootstrap has run, and no Terraform has been applied.** Neither `infra/aws/bootstrap.sh` nor `infra/terraform/` exists yet; they are Phase A deliverables.
 
 ---
 
@@ -23,25 +31,38 @@ Three operator actions, in this order. Everything after them is scripted.
 
 ## 1. Install tooling
 
-**Mac: done, 2026-07-30. Jetson: still to do.** Versions are pinned deliberately. Do this on whichever machine will run the bootstrap. Doing it on both is fine and costs nothing.
+**Mac: done, 2026-07-30. Jetson: done, 2026-07-30.** Versions are pinned deliberately. Do this on whichever machine will run the bootstrap. Doing it on both is fine and costs nothing.
 
-### On the Jetson (aarch64 Linux)
+### On the Jetson (aarch64 Linux): COMPLETE
+
+Installed 2026-07-30. Verified state:
+
+| Tool | Version | Path | Notes |
+|---|---|---|---|
+| AWS CLI | `2.36.3` | `~/.local/bin/aws` | Already present and sufficient; not reinstalled |
+| Terraform | `1.15.8` | `~/.local/bin/terraform` | Replaced 1.15.8's predecessor 1.9.8, which is below the 1.11 floor |
+
+**Two corrections to what this section used to say. Both cost a dead-end when followed literally.**
+
+**Install to `~/.local/bin`, not `/usr/local/bin`.** On the Jetson `~/.local/bin` is PATH position 7 and `/usr/local/bin` is position 9, so a `sudo install ... /usr/local/bin/terraform` puts the new binary where the *old* one shadows it. `terraform version` keeps printing the old version and the failure reads like a broken download. No `sudo` is needed. This is the same PATH trap the Mac hit, inverted.
+
+**Verify the checksum.** The Mac block does; this one did not. Corrected below.
 
 ```bash
-# AWS CLI v2. v1 predates every root-credential and SSO operation this
-# project needs. --update is safe whether or not a v2 already exists.
-curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o /tmp/awscliv2.zip
-unzip -q -o /tmp/awscliv2.zip -d /tmp
-sudo /tmp/aws/install --update
+# AWS CLI v2 — already 2.36.3 on this box, which clears the gate.
 aws --version                       # must print aws-cli/2.x
 
-# Terraform 1.15.8. Anything below 1.11 lacks GA S3 native state locking,
-# which this design depends on.
-curl -fsSL https://releases.hashicorp.com/terraform/1.15.8/terraform_1.15.8_linux_arm64.zip -o /tmp/tf.zip
-unzip -q -o /tmp/tf.zip -d /tmp
-sudo install -m 755 /tmp/terraform /usr/local/bin/terraform
-terraform version                   # must print v1.15.8
+# Terraform 1.15.8, checksum-verified, into ~/.local/bin (no sudo).
+cd "$(mktemp -d)"
+curl -fsSL -O https://releases.hashicorp.com/terraform/1.15.8/terraform_1.15.8_linux_arm64.zip
+curl -fsSL -O https://releases.hashicorp.com/terraform/1.15.8/terraform_1.15.8_SHA256SUMS
+grep linux_arm64 terraform_1.15.8_SHA256SUMS | sha256sum -c -   # must print OK
+unzip -q -o terraform_1.15.8_linux_arm64.zip
+install -m 755 terraform "$HOME/.local/bin/terraform"
+hash -r && terraform version        # must print v1.15.8
 ```
+
+Acceptance test actually run, rather than trusting the version string: an s3 backend with `use_lockfile = true` under `required_version = ">= 1.11"` now fails only on credentials, not on an unsupported argument. That is the capability the upgrade exists for.
 
 ### On the Mac (Apple silicon): COMPLETE
 
@@ -101,7 +122,7 @@ Required by the assignment deliverable, and it unlocks free unlimited `ubuntu-24
 
 ## 3. Enable IAM Identity Center in the management account
 
-**Steps 3a through 3d are COMPLETE as of 2026-07-30.** Instance enabled in `us-west-2`, user `rock.lambros` created, `AdministratorAccess` permission set created, assignment to the management account shows **Provisioned**. Step 3e (`aws configure sso`) is the remaining piece and must be run on each machine that will operate the account. The steps below are retained as the reproduction record.
+**Steps 3a through 3e are COMPLETE as of 2026-07-30.** Instance enabled in `us-west-2`, user `rock.lambros` created, `AdministratorAccess` permission set created, assignment to the management account shows **Provisioned**, and `aws configure sso` is wired on the Jetson with the gate passing. Step 3e must still be repeated on each *additional* machine that will operate the account. The steps below are retained as the reproduction record.
 
 Console, one time. This is the only manual surface in the entire project. It exists because `sso-admin:CreateInstance` rejects creation inside an organization management account, so there is no API path.
 
@@ -168,25 +189,47 @@ Left nav **AWS accounts**. You will see the organization tree.
 5. Click **Submit**.
 6. Wait until the status shows **Provisioned**. It takes under a minute.
 
-### 3e. Wire the CLI on the Jetson
+### 3e. Wire the CLI on the Jetson: COMPLETE
 
-Run `aws configure sso` and answer exactly this:
+Done 2026-07-30. The gate passes. Retained as the reproduction record, with one correction that matters on any headless or remote machine.
 
-| Prompt | Answer |
-|---|---|
-| `SSO session name` | `rockcyber` |
-| `SSO start URL` | the portal URL you copied in step 3a |
-| `SSO region` | `us-west-2` |
-| `SSO registration scopes` | press Enter to accept `sso:account:access` |
+**Do not use plain `aws configure sso` or plain `aws sso login` on a box you are not sitting at.** Both use the OAuth authorization-code + PKCE grant, which binds `redirect_uri` to a one-shot listener on `127.0.0.1:<random-port>`. Approving that URL from a phone or from the Mac authenticates fine and then fails to deliver the code, because the browser cannot reach loopback on the Jetson. The symptom is a login that hangs forever with no error.
 
-A browser opens. Approve the request. Then:
+Use the **device authorization grant** instead. The machine polls AWS for the result rather than receiving a callback, so the approving browser does not have to be on the same host.
 
-| Prompt | Answer |
-|---|---|
-| account selection | `RockCyber`, the management account. It is the only choice today |
-| `CLI default client Region` | `us-west-2` |
-| `CLI default output format` | `json` |
-| `CLI profile name` | `rc-mgmt` |
+Write the session block directly rather than driving the interactive wizard:
+
+```bash
+cat >> ~/.aws/config <<'EOF'
+
+[sso-session rockcyber]
+sso_start_url = <the portal URL from step 3a>
+sso_region = us-west-2
+sso_registration_scopes = sso:account:access
+EOF
+chmod 600 ~/.aws/config
+
+# Device-code login. Prints a URL and a code; approve from any device.
+aws sso login --sso-session rockcyber --use-device-code --no-browser
+```
+
+Then discover the account ID from the session rather than copying it out of the gitignored `docs/account-ids.local.md`, which keeps that file off this machine entirely:
+
+```bash
+TOKEN=$(jq -r .accessToken ~/.aws/sso/cache/$(printf 'rockcyber' | sha1sum | cut -d' ' -f1).json)
+ACCT=$(aws sso list-accounts --access-token "$TOKEN" --region us-west-2 \
+        --query 'accountList[0].accountId' --output text)
+
+cat >> ~/.aws/config <<EOF
+
+[profile rc-mgmt]
+sso_session = rockcyber
+sso_account_id = ${ACCT}
+sso_role_name = AdministratorAccess
+region = us-west-2
+output = json
+EOF
+```
 
 Verify:
 
@@ -194,9 +237,11 @@ Verify:
 aws sts get-caller-identity --profile rc-mgmt
 ```
 
-It must return an ARN of the form `arn:aws:sts::<management-account-id>:assumed-role/AWSReservedSSO_AdministratorAccess_.../rock.lambros`. **That command succeeding is the gate.** Once it does, the bootstrap script can do everything else.
+It must return an ARN of the form `arn:aws:sts::<management-account-id>:assumed-role/AWSReservedSSO_AdministratorAccess_.../rock.lambros`. **That command succeeding is the gate.** Once it does, the bootstrap script can do everything else. Confirm you are in the management account and not merely *an* account by checking `aws sts get-caller-identity --query Account` equals `aws organizations describe-organization --query Organization.MasterAccountId`.
 
 Re-authenticate any time with `aws sso login --profile rc-mgmt`.
+
+Two operational gotchas worth keeping. Backgrounding the poller needs `setsid`, because the parent exits immediately and the shell prints `Done` while the real poller lives on. And `pkill -f "aws sso login"` **self-matches the invoking shell**, whose command line contains that string, killing your own session with exit 144 — kill by recorded PID instead.
 
 Console click-paths above are written against the current console. AWS moves labels around. The **values** in the tables are the part that matters and are fixed by this design. If a label has moved, match on the value.
 
@@ -230,8 +275,8 @@ Three properties make this project machine-portable, so moving costs one `aws co
 | Stage | Where | Produces | Status |
 |---|---|---|---|
 | A. Author spec, bootstrap script, Terraform, workflows | Any machine, zero AWS calls | Committed code | Spec done. Code not yet written |
-| B. Install tooling, enable Identity Center, `aws configure sso` | The machine that will operate the account | An SSO profile | Not started, see "Do this next" |
-| C. Run `bootstrap.sh`, then `terraform apply` | Same machine, or CI | Live AWS resources | Not started |
+| B. Install tooling, enable Identity Center, `aws configure sso` | The machine that will operate the account | An SSO profile | **Complete on Mac and Jetson, 2026-07-30** |
+| C. Run `bootstrap.sh`, then `terraform apply` | Same machine, or CI | Live AWS resources | Not started. Blocked only on Phase A code |
 
 ## What exists right now
 
