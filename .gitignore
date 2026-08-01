@@ -75,3 +75,8 @@ htmlcov/
 
 # Raw dataset, fetched by scripts/fetch_jigsaw.sh, never committed
 /data/raw/
+
+# RunPod launch registry: runtime state, not source. It records live pod ids so a crash
+# between "pod created" and "pod ready" still leaves something terminatable. Committing it
+# would ship one machine's live pods to every other clone.
+infra/runpod/runpod_pods.json
