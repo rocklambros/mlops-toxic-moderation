@@ -35,9 +35,13 @@ CORPUS_TEST = (
 
 def run_pytest(args: list[str], env_overrides: dict[str, str]) -> subprocess.CompletedProcess:
     env = dict(os.environ)
-    # Set explicitly, never inherited: this suite's own behaviour must not depend on whether
-    # the developer running it happens to be inside CI.
-    env.setdefault("CI", "")
+    # Cleared, not defaulted. `setdefault` only assigns when the key is absent, so inside CI
+    # -- where CI=true is already set -- it did nothing and every probe below inherited it.
+    # The four `--collect-only` probes then tripped the fake-green guard, and the test job
+    # failed on the first real CI run while passing on every developer machine, because a
+    # developer machine is the one place the key is absent. A caller that wants the guard
+    # armed says so in env_overrides, which is what the guard's own test does.
+    env["CI"] = ""
     env.update(env_overrides)
     env = {key: value for key, value in env.items() if value != ""}
     return subprocess.run(
