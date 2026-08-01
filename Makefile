@@ -60,6 +60,42 @@ serve-deps: check-py
 test-integration:
 	PYTHONHASHSEED=0 $(BIN)/pytest -m integration
 
+.PHONY: ui-lock
+
+# The Streamlit surfaces resolve on their own, into their own hashed lock, and are NOT
+# installed into the development venv. Nothing in the test suite imports streamlit: the UI
+# modules import it inside the functions that draw, so the pure logic -- the label payload,
+# the challenger column, the client -- is unit-tested without a 200 MB dependency in the
+# unit CI job. `requirements/ui.txt` is what the two UI images install, wheels-only and
+# hash-checked, same posture as `lock` and `serve-deps`.
+ui-lock: check-py
+	$(PY) -m venv .venv-lock
+	.venv-lock/bin/pip install --only-binary=:all: pip-tools==7.4.1
+	.venv-lock/bin/pip-compile --generate-hashes \
+	  --output-file requirements/ui.txt requirements/ui.in
+	rm -rf .venv-lock
+
+.PHONY: monitor-lock rescorer-lock
+
+# The monitoring dashboard's own surface. It carries a database driver, unlike the two
+# user-facing Streamlit images, because rubric 3.2 requires the dashboard to read the
+# database directly -- as `monitoring_ro`, a read-only role.
+monitor-lock: check-py
+	$(PY) -m venv .venv-lock
+	.venv-lock/bin/pip install --only-binary=:all: pip-tools==7.4.1
+	.venv-lock/bin/pip-compile --generate-hashes \
+	  --output-file requirements/monitor.txt requirements/monitor.in
+	rm -rf .venv-lock
+
+# The challenger re-scorer. Installed by nothing else, so cutting it (ordered cut list item
+# 3) removes onnxruntime and tokenizers from the project entirely.
+rescorer-lock: check-py
+	$(PY) -m venv .venv-lock
+	.venv-lock/bin/pip install --only-binary=:all: pip-tools==7.4.1
+	.venv-lock/bin/pip-compile --generate-hashes \
+	  --output-file requirements/rescorer.txt requirements/rescorer.in
+	rm -rf .venv-lock
+
 # -s so the measured percentiles reach the operator's terminal, not just the report file.
 loadtest:
 	PYTHONHASHSEED=0 $(BIN)/pytest -m perf -s
@@ -69,3 +105,25 @@ serve:
 
 purge:
 	$(BIN)/python -m backend.retention
+
+.PHONY: heldout seed-demo seed-demo-purge
+
+# The dashboard's data source (premortem C5). `heldout` exports the LOCKED test split, so
+# the replayed comments are ones the model never trained on -- replaying training rows would
+# make live accuracy a measurement of memorisation. `seed-demo` then replays them through a
+# running backend and exits non-zero if the resulting dataset would leave a graded panel
+# degenerate.
+RAW_CSV ?= data/raw/jigsaw-toxic-comment-train.csv
+SEED_CSV ?= data/heldout.csv
+SEED_N ?= 2000
+SEED_DAYS ?= 14
+
+heldout:
+	PYTHONHASHSEED=0 $(BIN)/python -m scripts.export_heldout --csv $(RAW_CSV) --out $(SEED_CSV)
+
+seed-demo:
+	PYTHONHASHSEED=0 $(BIN)/python -m scripts.seed_demo --csv $(SEED_CSV) --n $(SEED_N) \
+	  --days $(SEED_DAYS)
+
+seed-demo-purge:
+	PYTHONHASHSEED=0 $(BIN)/python -m scripts.seed_demo --csv $(SEED_CSV) --purge --n 0

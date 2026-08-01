@@ -7,6 +7,12 @@
 tests
 docs
 infra
+# ...except the port-exposure contract, which frontend/reviewer.py imports. A .dockerignore
+# entry filters the build CONTEXT, so an excluded path makes `COPY infra/exposure.py` fail
+# the build outright rather than produce an image missing a file. The two modules named here
+# import nothing outside the standard library.
+!infra/__init__.py
+!infra/exposure.py
 claudedocs
 scripts
 artifacts

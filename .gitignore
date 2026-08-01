@@ -48,6 +48,12 @@ claudedocs/mlops_final_project_requrements_aws.md
 # Model artifacts (fetched from W&B by digest at deploy time, never committed)
 /artifacts/
 *.onnx
+# ...but the challenger contract's 32-byte digest fixture is a committed source artifact,
+# not a model. Same shape as the `!tests/fixtures/*.csv` exception above, and the same
+# failure it prevents: a blanket suffix rule that passes locally and produces a
+# FileNotFoundError on the first fresh clone. test_committed_test_fixtures_are_tracked
+# asserts the property rather than trusting this line.
+!tests/fixtures/**/*.onnx
 *.skops
 *.safetensors
 *.bin

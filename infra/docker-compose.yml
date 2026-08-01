@@ -1,0 +1,134 @@
+# Local full stack. `docker compose up` brings up every GRADED component.
+# The DistilBERT re-scorer is behind a profile, because it sits below the cut-line:
+#   with challenger:    docker compose --profile challenger up
+#   without (default):  docker compose up
+# Cutting it changes nothing else -- no Terraform edit, no instance resize, no failing test.
+#
+# Run from the repository root:
+#   docker compose -f infra/docker-compose.yml up -d --build
+#
+# Every credential below is an interpolation with a `:?` guard, so a missing one fails the
+# `up` loudly instead of starting the reviewer console on a default secret. `scripts/` has
+# no secret generator by design: mint them with `openssl rand -hex 32` and keep them in the
+# operator's password store, never in this file and never in the repository.
+#
+# The four images share one digest-pinned base (python:3.11-slim-bookworm). That digest is
+# the multi-arch INDEX, which carries linux/arm64/v8 as well as linux/amd64, so it resolves
+# on the aarch64 build box and on the t4g Graviton deploy target from the same pin.
+
+name: mlops-toxic-moderation
+
+services:
+  postgres:
+    image: postgres:16.4-alpine
+    environment:
+      # A throwaway local container on 5433, holding replayed public Jigsaw comments. In AWS
+      # this is RDS and the password is an SSM SecureString, never a compose literal.
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: toxic
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d toxic"]
+      interval: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/toxic
+      MODEL_ARTIFACT_PATH: /artifacts/toxic-clf.skops
+      MODEL_CARD_PATH: /artifacts/MODEL_CARD.md
+      MODEL_DIGEST: ${MODEL_DIGEST:?set MODEL_DIGEST to the sha256 in the model card}
+      MODEL_REGISTRY_VERSION: ${MODEL_REGISTRY_VERSION:-1}
+      THRESHOLDS_PATH: /artifacts/thresholds.json
+      REVIEWER_SHARED_SECRET: ${REVIEWER_SHARED_SECRET:?set REVIEWER_SHARED_SECRET}
+      REVIEWER_ID: ${REVIEWER_ID:-rock}
+      DEMO_API_KEY: ${DEMO_API_KEY:?set DEMO_API_KEY}
+      SUBMITTER_FP_KEY: ${SUBMITTER_FP_KEY:?set SUBMITTER_FP_KEY}
+      RANDOM_AUDIT_RATE: ${RANDOM_AUDIT_RATE:-0.05}
+      SPOOL_PATH: /var/lib/toxic/predictions.spool
+      # Production defaults. `make seed-demo` replays ~2000 held-out comments through this
+      # endpoint from one peer address, so it needs the limit raised for the duration --
+      #   RATE_LIMIT_PER_MINUTE=4000 RATE_LIMIT_BURST=4000 docker compose ... up -d backend
+      # -- and lowered again afterwards. Deliberately an operator action with two visible
+      # variables rather than a retry loop inside the seeder: an abuse control that a tool
+      # quietly works around is not a control, and the seeder is the one thing in the
+      # repository allowed to write a chosen timestamp.
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-30}
+      RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-10}
+    volumes:
+      - ../artifacts:/artifacts:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+    environment:
+      BACKEND_URL: http://backend:8000
+      DEMO_API_KEY: ${DEMO_API_KEY:?set DEMO_API_KEY}
+    ports:
+      - "8501:8501"
+    depends_on:
+      - backend
+
+  reviewer:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile.reviewer
+    environment:
+      BACKEND_URL: http://backend:8000
+      DEMO_API_KEY: ${DEMO_API_KEY:?set DEMO_API_KEY}
+    ports:
+      # Loopback only, locally. In AWS this port lives on its own security group,
+      # restricted to the operator, and is never carried by var.demo_ingress_cidrs.
+      - "127.0.0.1:8503:8503"
+    depends_on:
+      - backend
+
+  monitoring:
+    build:
+      context: ..
+      dockerfile: monitoring/Dockerfile
+    environment:
+      # The read-only role created by ./postgres-init/02-monitoring-role.sql. The dashboard
+      # never holds the credential the backend writes with (premortem H16).
+      MONITORING_DB_DSN: postgresql+psycopg://monitoring_ro:monitoring_ro@postgres:5432/toxic
+      BASELINE_PATH: /artifacts/baseline_flag_rates.json
+      THRESHOLDS_PATH: /artifacts/thresholds.json
+      DASHBOARD_WINDOW_DAYS: ${DASHBOARD_WINDOW_DAYS:-14}
+    volumes:
+      - ../artifacts:/artifacts:ro
+    ports:
+      - "8502:8502"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  rescorer:
+    profiles: ["challenger"]
+    build:
+      context: ..
+      dockerfile: rescorer/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/toxic
+      CHALLENGER_DIR: /artifacts/challenger
+      # Which ONNX file is loaded is configuration. Phase 1's float32 export is the valid
+      # artifact; its int8 sibling (model_quantized.onnx) failed the load-time parity gate,
+      # so promoting it is these two variables plus a re-export, not a code change.
+      CHALLENGER_MODEL_FILE: ${CHALLENGER_MODEL_FILE:-model.onnx}
+      CHALLENGER_SHA256: ${CHALLENGER_SHA256:?set CHALLENGER_SHA256 from the model card}
+    volumes:
+      - ../artifacts:/artifacts:ro
+    depends_on:
+      postgres:
+        condition: service_healthy

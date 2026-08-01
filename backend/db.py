@@ -76,6 +76,10 @@ class Prediction(Base):
     persist_status: Mapped[str] = mapped_column(String(10))
     error_kind: Mapped[str | None] = mapped_column(String(60))
     client_fp: Mapped[str | None] = mapped_column(String(16))
+    # Phase 3's per-source quota key. Declared here as well as in
+    # `backend/schema_phase3.py` so a database created by `init_db` alone -- which is what
+    # the app's own startup path does -- still carries the column the quotas count on.
+    submitter_fp: Mapped[str | None] = mapped_column(String(16), index=True)
 
     __table_args__ = (
         CheckConstraint("status in ('ok','error')", name="ck_predictions_status"),
@@ -167,6 +171,10 @@ class PredictionRow:
     persist_status: str
     error_kind: str | None = None
     client_fp: str | None = None
+    # The per-source quota key (backend/fingerprint.py). `client_fp` cannot serve: it is a
+    # digest of the shared demo key, so every request the frontend proxies carries the same
+    # value and the whole internet would share one bucket.
+    submitter_fp: str | None = None
     ts: dt.datetime | None = None
 
 
@@ -224,6 +232,7 @@ def insert_prediction(session, row: PredictionRow) -> None:
         "persist_status": row.persist_status,
         "error_kind": row.error_kind,
         "client_fp": row.client_fp,
+        "submitter_fp": row.submitter_fp,
     }
     if row.ts is not None:
         values["ts"] = row.ts

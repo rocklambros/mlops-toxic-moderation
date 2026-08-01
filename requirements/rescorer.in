@@ -1,0 +1,13 @@
+# The DistilBERT challenger re-scorer (EC2 #3, CPU, no ingress). It is item 3 on the
+# ordered cut list, so it resolves into its own lock and is installed by nothing else: a
+# machine where the challenger has been cut needs neither onnxruntime nor tokenizers, and
+# `tests/unit/test_challenger.py` proves the code agrees.
+#
+# Both compiled wheels below publish manylinux aarch64 distributions, which the serving
+# fleet (t4g Graviton, us-west-2) requires and which `--only-binary=:all:` would otherwise
+# turn into a source build inside the image.
+-r base.txt
+onnxruntime==1.19.2
+tokenizers==0.20.3
+SQLAlchemy==2.0.36
+psycopg[binary]==3.2.3

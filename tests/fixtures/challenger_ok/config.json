@@ -1,0 +1,13 @@
+{
+  "architectures": ["DistilBertForSequenceClassification"],
+  "model_type": "distilbert",
+  "problem_type": "multi_label_classification",
+  "id2label": {
+    "0": "toxic",
+    "1": "severe_toxic",
+    "2": "obscene",
+    "3": "threat",
+    "4": "insult",
+    "5": "identity_hate"
+  }
+}

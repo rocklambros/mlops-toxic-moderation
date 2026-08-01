@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "data_version": "3f1c0a9d5b7e2c4408a6d1f9e0b3c7a25d84f6019c2b7e35a1d0c8f4b6e9a273",
+  "model_version": "toxic-clf:v3",
+  "generated_at": "2026-08-02T18:00:00+00:00",
+  "n": 23851,
+  "flag_rates": {
+    "toxic": 0.0961,
+    "severe_toxic": 0.0100,
+    "obscene": 0.0530,
+    "threat": 0.0030,
+    "insult": 0.0494,
+    "identity_hate": 0.0088
+  }
+}

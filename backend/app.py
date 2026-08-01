@@ -7,9 +7,11 @@ handler, `latency_ms` is stamped through persistence rather than before it (prem
 and a failure writes a row rather than vanishing.
 """
 
+import datetime as dt
 import json
 import logging
 import random
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -24,11 +26,14 @@ from backend.audit import FLAGGED_SAMPLE_RATE, should_random_audit
 from backend.auth import API_KEY_HEADER, check_api_key, client_fingerprint
 from backend.config import Settings, load_settings
 from backend.db import PendingWrite, PredictionRow, ReviewIntent, init_db, make_engine
+from backend.fingerprint import SESSION_FP_HEADER, caller_identity, submitter_fp
 from backend.model_loader import load_from_settings
 from backend.persistence import persist_prediction
 from backend.policy import decide, load_thresholds
 from backend.preprocess import prepare_input
 from backend.ratelimit import RateLimiter
+from backend.review_api import router as review_router
+from backend.schema_phase3 import apply_phase3_schema
 from backend.schemas import PredictRequest
 from backend.spool import Spool, SpoolFull
 from model.contract import LabelScore, PredictionResponse, enforce_hierarchy, probs_to_dict
@@ -50,6 +55,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.engine = make_engine(settings)
         app.state.session_factory = sessionmaker(bind=app.state.engine, expire_on_commit=False)
         init_db(app.state.engine)
+        # `init_db` creates the three tables from the ORM. It does not create the columns
+        # and partial indexes that live only in the Phase 3 migration -- `is_seed`, the
+        # composite index the per-source quota counts against, and the one-user-verdict
+        # index -- so without this line they exist only where somebody ran the migration by
+        # hand, and `make seed-demo` fails on its first statement against the deployed
+        # database. Both are idempotent, so re-running them on every boot is free.
+        apply_phase3_schema(app.state.engine)
         # Startup fails closed: a digest or allowlist violation must stop the container from
         # ever accepting traffic, not surface as a 500 on the first request.
         app.state.model = load_from_settings(settings)
@@ -60,11 +72,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # sample lets an attacker time submissions to miss it.
         app.state.rng = random.SystemRandom()
         app.state.rejected = {"unauthenticated": 0, "rate_limited": 0, "oversize": 0}
+        # The quota key must exist even when the deploy forgot to set one, or every
+        # per-source limit in backend/queue_guard.py counts zero for every caller. A random
+        # per-process key keeps the control live; it only loses stability across restarts,
+        # and that trade is stated out loud rather than silently taken.
+        if settings.submitter_fp_key:
+            app.state.submitter_fp_key = settings.submitter_fp_key.encode("utf-8")
+        else:
+            app.state.submitter_fp_key = secrets.token_bytes(32)
+            log.warning(
+                json.dumps(
+                    {
+                        "event": "config",
+                        "warning": "SUBMITTER_FP_KEY is unset; using a random per-process "
+                        "key, so per-source quota buckets reset on restart",
+                    },
+                    sort_keys=True,
+                )
+            )
         yield
         app.state.engine.dispose()
 
     app = FastAPI(title="Toxic Comment Moderation API", version="2.0", lifespan=lifespan)
     app.state.settings = settings
+    # Every UI write goes through this router, so neither Streamlit container ever holds a
+    # database credential (premortem H12, H16).
+    app.include_router(review_router)
 
     def _reject(kind: str, status_code: int, detail: str, headers=None) -> JSONResponse:
         app.state.rejected[kind] += 1
@@ -86,6 +119,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not app.state.limiter.allow(fingerprint):
             return _reject("rate_limited", 429, "rate limit exceeded", {"Retry-After": "60"})
         request.state.client_fp = fingerprint
+        # Derived here, where the API key has just been verified: a session fingerprint is
+        # only honoured from a caller that also presented the frontend's key, and the
+        # X-Forwarded-For a proxy would set is never consulted -- `caller_identity` has no
+        # parameter for it.
+        request.state.submitter_fp = submitter_fp(
+            caller_identity(
+                request.client.host if request.client else "unknown",
+                request.headers.get(SESSION_FP_HEADER),
+                api_key_ok=True,
+            ),
+            dt.datetime.now(dt.UTC).date(),
+            app.state.submitter_fp_key,
+        )
         return await call_next(request)
 
     @app.post("/predict", response_model=PredictionResponse)
@@ -94,6 +140,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         state = request.app.state
         request_id = str(uuid.uuid4())
         client_fp = getattr(request.state, "client_fp", None)
+        source_fp = getattr(request.state, "submitter_fp", None)
         model = state.model
 
         try:
@@ -120,6 +167,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 persist_status="direct",
                 error_kind=type(exc).__name__,
                 client_fp=client_fp,
+                submitter_fp=source_fp,
             )
             outcome = _persist(state, PendingWrite(prediction=failed), started)
             _log(model, failed, outcome, started)
@@ -153,6 +201,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             status="ok",
             persist_status="direct",
             client_fp=client_fp,
+            submitter_fp=source_fp,
         )
         outcome = _persist(state, PendingWrite(prediction=row, review=review), started)
         _log(model, row, outcome, started)

@@ -1,0 +1,13 @@
+# The two Streamlit surfaces (user UI on 8501, reviewer console on 8503).
+#
+# Deliberately NOT `-r base.txt`: the UI holds no model, no database driver and no
+# scikit-learn. It renders what the backend returns. Every write goes through the backend
+# API (premortem H12, H16), so there is nothing here that could open a connection to RDS
+# even if a credential reached the instance.
+streamlit==1.39.0
+httpx==0.27.2
+pandas==2.2.3
+# Pinned to the same numpy as requirements/base.txt. Left to the resolver the UI surface
+# drifts onto a different major-minor from the training and serving surfaces, and "which
+# numpy" becomes a question with three answers in one repository.
+numpy==2.1.3
