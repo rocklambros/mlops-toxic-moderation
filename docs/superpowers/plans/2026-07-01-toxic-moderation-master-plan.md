@@ -155,14 +155,25 @@ def predict_proba(texts: list[str]) -> "np.ndarray": ...   # shape (len(texts), 
 **Safe loader (Phase 2).**
 ```python
 # backend/model_loader.py
+TRUSTED_TYPES: tuple[str, ...]        # explicit static allowlist; never get_untrusted_types()
+
 @dataclass
 class LoadedModel:
-    model_version: str                # e.g. "toxic-clf:v3@sha256:abcd..."
+    model_version: str                # full, internal:  "toxic-clf:v3@sha256:abcd..."
+    public_version: str               # opaque, public:  "toxic-clf:v3"
     def predict_proba(self, texts: list[str]) -> "np.ndarray": ...
 
-def load_model(artifact_path: "Path", expected_sha256: str) -> LoadedModel: ...
-# verifies SHA-256, skops.io.load with a trusted allowlist, fails closed on mismatch
+def load_model(artifact_path: "Path", expected_sha256: str,
+               artifact_name: str, registry_version: int) -> LoadedModel: ...
+def load_from_settings(settings: "Settings") -> LoadedModel: ...
+# expected_sha256 is the digest of record read from the git-committed MODEL_CARD.md and
+# cross-checked against MODEL_DIGEST. Fails closed on any mismatch.
 ```
+
+Two version fields, not one. `/health` strips the digest so the exact artifact cannot be
+fingerprinted by an attacker crafting evasions; returning it on every `/predict` response
+would make that control inert. The public label needs the registry version, so `load_model`
+takes it rather than guessing it from the filename.
 
 **Policy (Phase 1 tunes thresholds; Phase 2 applies).**
 ```python
@@ -199,12 +210,51 @@ class PredictionResponse(BaseModel):
 **Database writes (Phase 2 defines; Phase 3 consumes).**
 ```python
 # backend/db.py
-def insert_prediction(session, response: PredictionResponse, input_text: str) -> None: ...
-def enqueue_review(session, request_id: str) -> None: ...
-def fetch_pending_reviews(session, limit: int) -> list["ReviewRow"]: ...
-def write_distilbert_probs(session, request_id: str, probs: dict[str, float]) -> None: ...
-def submit_review(session, request_id: str, reviewer_labels: dict[str, int], reviewer_id: str) -> None: ...
+@dataclass(frozen=True)
+class PredictionRow: ...     # request_id, ts, input_text, input_chars, model_version, probs,
+                             # decision, max_prob, latency_ms, status, persist_status,
+                             # error_kind, client_fp
+
+@dataclass(frozen=True)
+class ReviewIntent: ...      # request_id, source, sample_rate, input_text_snapshot, enqueued_ts
+
+@dataclass(frozen=True)
+class PendingWrite:
+    prediction: PredictionRow
+    review: "ReviewIntent | None"
+
+def init_db(engine) -> None: ...                                       # init_schema is an alias
+def write_pending(session, pending: PendingWrite, stamp) -> int: ...   # returns latency_ms
+def insert_prediction(session, row: PredictionRow) -> None: ...        # idempotent on request_id
+def enqueue_review(session, intent: ReviewIntent) -> None: ...         # idempotent on request_id
+def fetch_pending_reviews(session, limit: int) -> list["ReviewQueue"]: ...
+
+# Table vocabularies, enforced by CHECK constraints of the same names.
+REVIEW_SOURCES = ("flagged", "random-audit", "user-report")      # ck_review_source
+REVIEW_STATUSES = ("pending", "rescored", "reviewed", "expired") # ck_review_status
+FEEDBACK_SOURCES = ("reviewer", "user")                          # ck_feedback_source
+
+# backend/audit.py
+FLAGGED_SAMPLE_RATE: float = 1.0     # written onto a review row whose source is 'flagged'
 ```
+
+`write_pending` is the seam, not `insert_prediction(session, response, input_text)`: a failed
+request has no `PredictionResponse` and must still write a row, and the spool has to replay a
+prediction *and* its review row through one code path.
+
+`review_queue.sample_rate` is **nullable**, and `review_queue_sample_rate_ck` is why: a design
+stratum (`flagged` or `random-audit`) must carry the inclusion probability it was drawn with,
+and a `user-report` must carry NULL because it has none, so the estimator skips it until a
+human reviews it under a known design. Stratified collection without stratified estimation is
+still biased, and the weight cannot be reconstructed later because the audit rate is a
+deploy-time setting that may change between rows.
+
+`PredictionResponse.model_version` carries `LoadedModel.public_version`. The full version goes
+to `predictions.model_version` and to the structured request log, never to a client.
+
+Phase 3 owns `submit_review(...)` and `write_distilbert_probs(...)`. Both need reviewer session
+identity and re-scorer status semantics that do not exist in Phase 2; the tables they write are
+defined here.
 
 **W&B artifact naming.** Classical artifact `toxic-clf`, DistilBERT artifact `toxic-distilbert`. Versions `:vN`. The pinned digest travels as `@sha256:...` in the model card and the deploy env var `MODEL_DIGEST`.
 
@@ -323,22 +373,27 @@ Each phase produces a working, testable increment and lands on its own feature b
 
 **Branch:** `feat/phase-2-backend-rds`. **Needs:** promoted classical artifact + digest, `thresholds.json`, an RDS Postgres (or local Postgres for tests).
 
-**Files:** `backend/schemas.py`, `backend/model_loader.py`, `backend/policy.py`, `backend/db.py`, `backend/app.py`, `backend/Dockerfile`, `requirements/serve.txt`, `tests/unit/test_policy.py`, `tests/unit/test_model_loader.py`, `tests/integration/test_api_roundtrip.py`.
+**Files:** `backend/config.py`, `backend/schemas.py`, `backend/preprocess.py`, `backend/model_card.py`, `backend/model_loader.py`, `backend/policy.py`, `backend/audit.py`, `backend/db.py`, `backend/spool.py`, `backend/persistence.py`, `backend/ratelimit.py`, `backend/auth.py`, `backend/retention.py`, `backend/app.py`, `backend/Dockerfile`, `.dockerignore`, `requirements/serve.in`, `requirements/serve.txt`, `MODEL_CARD.md` (digest of record), `docs/latency-baseline.md`, `tests/unit/*`, `tests/integration/*`, `tests/perf/test_latency_budget.py`.
 
-**Interfaces produced:** the three RDS tables (`predictions`, `review_queue`, `feedback`), `load_model()`, `decide()`, DB write functions, the live `/predict` `/health` endpoints.
+**Interfaces produced:** the three RDS tables (`predictions`, `review_queue`, `feedback`), `load_model()`, `decide()`, the `PendingWrite` DB seam, the durable spool, the retention purge, the live `/predict` `/health` endpoints.
 
 **Tasks:**
-1. `backend/schemas.py`: `PredictRequest{text}`, reuse `model/contract.py` for the response.
-2. `backend/model_loader.py`: verify SHA-256 against `expected_sha256`, `skops.io.load` with a trusted allowlist, return `LoadedModel` with `model_version` and `predict_proba`. Fail closed on mismatch. Test with a fixture skops artifact and a tampered one.
-3. `backend/policy.py`: `decide(probs, thresholds)` sets per-label flags and the allow/review/block decision (block on high-confidence severe labels, review on near-threshold or any toxic flag, else allow). Deterministic, unit tested at boundaries.
-4. `backend/db.py`: SQLAlchemy models for the three tables, idempotent create, `insert_prediction`, `enqueue_review`. DSN from env.
-5. `backend/app.py`: `POST /predict` (validate → `predict_proba` → `decide` → build `PredictionResponse` → persist + maybe enqueue → return with `latency_ms`), `GET /health` (model version + DB readiness). `request_id` is a uuid.
-6. `backend/Dockerfile`: CPU serve image on pinned `requirements/serve.txt`, artifact path + digest as build/deploy args.
-7. Integration tests: `/predict` and `/health` against a test Postgres, a full prediction-to-DB round trip.
+1. `backend/schemas.py`: `PredictRequest{text}`, reuse `model/contract.py` for the response. `backend/config.py` holds `Settings`; `MAX_INPUT_CHARS` is a hard literal with no environment key, because an abuse control a deploy-time variable can widen is not a control.
+2. `backend/model_loader.py`: verify SHA-256 against `expected_sha256`, `skops.io.load` under an **explicit static** `TRUSTED_TYPES` allowlist, return `LoadedModel` with `model_version`, `public_version`, and `predict_proba`. Fail closed on mismatch. The digest of record is read from the git-committed `MODEL_CARD.md` and cross-checked against `MODEL_DIGEST`, so forging an artifact requires compromising the registry **and** the repository. Test with a fixture skops artifact, a tampered one, and one carrying a type outside the allowlist.
+3. `backend/policy.py`: `decide(probs, thresholds)` sets per-label flags and the allow/review/block decision. `severe_toxic` implies `toxic` before the response is built. Deterministic, unit tested at boundaries.
+4. `backend/db.py`: SQLAlchemy models for the three tables, `init_db` idempotent create, `PredictionRow` / `ReviewIntent` / `PendingWrite`, `write_pending`, `insert_prediction`, `enqueue_review`, `fetch_pending_reviews`. Bounded pool with a 2 s checkout timeout. DSN from env.
+5. `backend/preprocess.py` imports `normalize` from `model/data/dedup.py` — the **same function object**, asserted by a test — so serving cannot drift from the corpus normalizer and reintroduce train/serve skew.
+6. Abuse controls on the public listener, all three in one `_gate` middleware that runs **before** the body is parsed: a 16 KB body cap, a demo `X-API-Key` compared with `hmac.compare_digest`, and a per-key token-bucket rate limit (`backend/ratelimit.py`, `backend/auth.py`). `/health` stays unauthenticated for the grader, the deploy gate, and the container `HEALTHCHECK`. Each control has a test that fails when the control is removed.
+7. `backend/app.py`: `POST /predict` (validate → `predict_proba` → `decide` → persist + maybe enqueue → return with `latency_ms`), `GET /health` (opaque model version + DB readiness + spool depth). `request_id` is a uuid. One structured JSON log line per request, carrying the full model version and never the input text.
+8. Complete prediction logging **without an availability switch** (`backend/spool.py`, `backend/persistence.py`): direct insert, then an fsync'd bounded local spool with an idempotent drain, and 503 only once the spool is saturated. Rubric 2.2 demands durability, not a 503 an attacker can trigger by pressuring the database.
+9. `latency_ms` is stamped **after** the inserts, inside the transaction, so the graded latency chart includes the persistence component; the commit round trip is measured separately as `commit_ms`. Failed requests write a row with `status='error'`, so the slow tail is present rather than structurally absent. One load pass records p50/p95/p99 against a real Postgres in `docs/latency-baseline.md`; budget p95 < 500 ms.
+10. `backend/retention.py`: expire pending reviews at a hard TTL, then null `predictions.input_text` past `INPUT_TEXT_RETENTION_DAYS` except where a review is genuinely still open, then null `review_queue.input_text_snapshot` at its own TTL regardless of status. Expiring first is what keeps the pending exemption from becoming attacker-controlled retention.
+11. `backend/Dockerfile` + `.dockerignore`: CPU serve image, base pinned by digest, dependencies from the hashed `requirements/serve.txt` installed wheels-only, non-root `appuser`, `HEALTHCHECK` whose `--start-period` covers the measured cold-start model load, no credential in any layer. The artifact is mounted at deploy time; the image never holds a registry credential.
+12. Integration tests against a **real Postgres** (testcontainers or a CI service): `/predict` and `/health`, a full prediction-to-DB round trip, the degraded and failed paths, and the retention purge.
 
-**Test strategy:** Unit for policy and loader (including the fail-closed path). Integration spins a Postgres (testcontainers or a CI service) and asserts a `/predict` call returns contract-valid JSON, writes one `predictions` row, and enqueues a `review_queue` row when policy says review.
+**Test strategy:** Unit for policy, loader (including the fail-closed path), rate limiter, spool, and persistence. Integration spins a Postgres and asserts a `/predict` call returns contract-valid JSON, writes one `predictions` row, and enqueues a `review_queue` row when policy says review. Mocks are for unit tests; the phase gate does not accept them.
 
-**Exit criteria:** `/predict` returns contract-valid JSON and persists a row; policy enqueues review rows correctly; `/health` reports version + DB ok; a tampered artifact refuses to load; integration tests green.
+**Exit criteria:** `/predict` returns contract-valid JSON and persists exactly one `predictions` row per request, including on the degraded and failed paths; policy enqueues review rows correctly; `/health` reports the opaque version + DB ok; no public response carries the artifact digest; a tampered artifact, a digest disagreeing with the model card, and a type outside the allowlist all refuse to load; every abuse control has a test that fails when the control is removed; with the database unreachable `/predict` still answers 200 and the row reaches Postgres after the drain; p95 latency under 500 ms recorded in `docs/latency-baseline.md`; the retention purge expires pending reviews at the hard TTL; integration tests green.
 
 **Enforcement skills:** `packaging-model-for-deployment` (loader boundary), plus the spec section 9 trust-boundary rules.
 

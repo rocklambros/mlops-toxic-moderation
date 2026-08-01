@@ -543,3 +543,34 @@ genai-security-project completeness evaluator. The fields above cover its substa
 | Next review | on the next promotion to `production`, or on any change to `split_version`, whichever comes first |
 | Change log | git history of this file; the model's own history is the W&B collection version list |
 | Security contact | [`SECURITY.md`](SECURITY.md) |
+
+## Artifact digest of record
+
+The serving backend refuses to load any artifact whose SHA-256 differs from this value, and
+refuses to start if the `MODEL_DIGEST` environment variable differs from it. This block is the
+provenance anchor: it lives in git rather than in the registry, so an attacker holding the
+registry credential cannot supply both the artifact and its expected digest. It is read by
+`backend/model_card.py::read_expected_digest` and cross-checked in
+`backend/model_loader.py::load_from_settings`.
+
+This value was **computed from the artifact in hand**, not transcribed from the registry UI:
+
+```bash
+sha256sum artifacts/toxic-clf.skops | cut -d' ' -f1
+# db678467907743fbce5d25ab8c9ad56cd0c89e053b46be81822dcb2095842454
+```
+
+A transcribed digest is a digest the registry supplied, which is exactly the co-location this
+control exists to break. It also could not have been recomputed by re-dumping: `skops.io.dump`
+embeds ZIP entry timestamps and is **not** byte-reproducible — three dumps of the same fitted
+pipeline produced three different SHA-256 values — so the digest of record must come from the
+exact file that was uploaded, and a "rebuild and compare" check would fail on a legitimate
+artifact.
+
+This block replaced a deliberate fail-closed sentinel (the SHA-256 of the string
+`PENDING PHASE 1 PROMOTION: no artifact has this digest`) that no file could match, so the
+backend refused to start until a real model was promoted. Phase 1 has now promoted one.
+
+- MODEL_ARTIFACT: toxic-clf
+- MODEL_REGISTRY_VERSION: 0
+- MODEL_DIGEST: sha256:db678467907743fbce5d25ab8c9ad56cd0c89e053b46be81822dcb2095842454

@@ -248,7 +248,17 @@ def test_aurora_clusters_are_denied_outright(policy):
 
 
 def test_detective_control_denies_cover_disable_and_redirect_not_only_delete(policy):
-    actions = set(statement(policy, "DenyDetectiveControlTampering")["Action"])
+    # The guardrail was split in two: blinding (StopLogging, UpdateDetector, ...) is denied
+    # unconditionally, while deletion exempts the org-teardown principal so the account can
+    # still be closed. The property under test is that no action escaped the split, so the
+    # union is what matters, not which statement carries which.
+    actions = {
+        action
+        for stmt in policy["Statement"]
+        if str(stmt.get("Sid", "")).startswith("DenyDetectiveControl")
+        for action in stmt["Action"]
+    }
+    assert actions, "no DenyDetectiveControl* statement survives; the guardrail is absent"
     required = {
         # Deleting the trail is the obvious evasion; redirecting it and narrowing it
         # to nothing are the quiet ones.

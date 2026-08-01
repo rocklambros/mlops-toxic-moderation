@@ -12,5 +12,11 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
-markers = ["integration: needs external services (deselect with -m 'not integration')"]
+# --strict-markers turns a typo'd mark into a collection error. Without it a mistyped
+# `integration` mark is only a warning, and the test it was meant to gate runs in the unit
+# job, where there is no Postgres.
+addopts = "-q --strict-markers"
+markers = [
+    "integration: needs external services (deselect with -m 'not integration')",
+    "perf: measures latency against a real database (deselect with -m 'not perf')",
+]

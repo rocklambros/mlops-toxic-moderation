@@ -52,20 +52,7 @@
       "Action": [
         "ec2:ModifyInstanceAttribute"
       ],
-      "Resource": "arn:aws:ec2:*:*:instance/*",
-      "Condition": {
-        "Null": {
-          "ec2:InstanceType": "false"
-        },
-        "StringNotEquals": {
-          "ec2:InstanceType": [
-            "t4g.small",
-            "t4g.medium",
-            "t4g.large",
-            "c7g.xlarge"
-          ]
-        }
-      }
+      "Resource": "arn:aws:ec2:*:*:instance/*"
     },
     {
       "Sid": "DenyRdsCreateWithoutManagedMasterPassword",

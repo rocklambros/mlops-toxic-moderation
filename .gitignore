@@ -35,6 +35,10 @@ claudedocs/mlops_final_project_requrements_aws.md
 # from ten commits. Tests passed locally because the files were on disk; a fresh clone
 # had no data pipeline at all.
 /data/
+# ...and the convenience symlink some worktrees carry. It points at an ABSOLUTE path on
+# one machine, so committing it gives every fresh clone and every CI runner a dangling
+# link, and leaks the developer's directory layout.
+/data
 *.csv
 # ...but the synthetic test fixture is a committed source artifact, not data.
 !tests/fixtures/*.csv

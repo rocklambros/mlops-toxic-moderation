@@ -54,8 +54,8 @@ Inherited from the master roadmap and `docs/superpowers/specs/2026-07-30-deliver
 - `backend/model_card.py` — `read_expected_digest`.
 - `backend/model_loader.py` — `TRUSTED_TYPES`, `LoadedModel`, `load_model`, `load_from_settings`, `sha256_file`, `ModelIntegrityError`.
 - `backend/policy.py` — `DecisionResult`, `decide`, `load_thresholds`.
-- `backend/audit.py` — `should_random_audit`, `FLAGGED_INCLUSION_PROBABILITY`.
-- `backend/db.py` — ORM models, `PredictionRow`, `ReviewIntent`, `PendingWrite`, `make_engine`, `init_schema`, `insert_prediction`, `enqueue_review`, `fetch_pending_reviews`, `write_pending`.
+- `backend/audit.py` — `should_random_audit`, `FLAGGED_SAMPLE_RATE`.
+- `backend/db.py` — ORM models, `PredictionRow`, `ReviewIntent`, `PendingWrite`, `make_engine`, `init_db` (alias `init_schema`), `insert_prediction`, `enqueue_review`, `fetch_pending_reviews`, `write_pending`, `with_persist_status`.
 - `backend/spool.py` — `Spool`, `SpoolFull`.
 - `backend/persistence.py` — `PersistResult`, `persist_prediction`, `drain_spool`.
 - `backend/ratelimit.py` — `RateLimiter`.
@@ -104,7 +104,7 @@ decide(probs: dict[str, float], thresholds: dict[str, float]) -> DecisionResult
 load_thresholds(path: Path) -> dict[str, float]
 
 # backend/audit.py
-FLAGGED_INCLUSION_PROBABILITY: float = 1.0
+FLAGGED_SAMPLE_RATE: float = 1.0
 should_random_audit(rate: float, rng: random.Random) -> bool
 
 # backend/db.py
@@ -112,7 +112,7 @@ should_random_audit(rate: float, rng: random.Random) -> bool
 @dataclass(frozen=True) class ReviewIntent: ...
 @dataclass(frozen=True) class PendingWrite: prediction: PredictionRow; review: ReviewIntent | None
 make_engine(settings) -> Engine                        # bounded pool, 2s checkout timeout
-init_schema(engine) -> None
+init_db(engine) -> None                                # Task 10a; init_schema is an alias
 insert_prediction(session, row: PredictionRow) -> None            # idempotent on request_id
 enqueue_review(session, intent: ReviewIntent) -> None             # idempotent on request_id
 fetch_pending_reviews(session, limit: int) -> list[ReviewQueue]
@@ -1645,7 +1645,7 @@ git commit -m "Add moderation policy with hierarchically coherent flags"
 - Create: `backend/audit.py`
 - Test: `tests/unit/test_audit.py`
 
-**Interfaces produced:** `FLAGGED_INCLUSION_PROBABILITY`, `should_random_audit`
+**Interfaces produced:** `FLAGGED_SAMPLE_RATE`, `should_random_audit`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1655,11 +1655,11 @@ import random
 
 import pytest
 
-from backend.audit import FLAGGED_INCLUSION_PROBABILITY, should_random_audit
+from backend.audit import FLAGGED_SAMPLE_RATE, should_random_audit
 
 
 def test_flagged_rows_are_sampled_with_certainty():
-    assert FLAGGED_INCLUSION_PROBABILITY == 1.0
+    assert FLAGGED_SAMPLE_RATE == 1.0
 
 
 def test_rate_zero_never_audits():
@@ -1715,7 +1715,7 @@ submissions to miss the sample.
 
 import random
 
-FLAGGED_INCLUSION_PROBABILITY: float = 1.0
+FLAGGED_SAMPLE_RATE: float = 1.0
 
 
 def should_random_audit(rate: float, rng: random.Random) -> bool:
@@ -1742,9 +1742,17 @@ git commit -m "Add random-audit sampling with an explicit inclusion probability"
 
 **Files:**
 - Create: `backend/db.py`, `tests/integration/__init__.py`, `tests/integration/conftest.py`
+- Modify: `requirements/dev.txt`, `requirements/dev.lock`
 - Test: `tests/integration/test_db_schema.py`
 
 **Interfaces produced:** `Prediction`, `ReviewQueue`, `Feedback`, `PredictionRow`, `ReviewIntent`, `PendingWrite`, `make_engine`, `init_schema`, `insert_prediction`, `enqueue_review`, `fetch_pending_reviews`, `write_pending`
+
+**Dependency:** the conftest below imports `testcontainers.postgres`, which no earlier task
+installs. Add `testcontainers[postgres]==4.8.2` to `requirements/dev.txt` — it is a test
+dependency and must not enter `serve.in`, which builds the production image — and re-lock
+with `make lock PY=<release 3.11>`. `pip-compile` prefers the pins already in `dev.lock`, so
+this adds `certifi`, `charset-normalizer`, `docker`, `idna`, `requests`, `urllib3` and
+`wrapt` and moves nothing. Install with the usual wheels-only, hash-checked line.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2235,12 +2243,13 @@ def with_persist_status(pending: PendingWrite, persist_status: str) -> PendingWr
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `PYTHONHASHSEED=0 .venv/bin/pytest tests/integration/test_db_schema.py -v -m integration`
-Expected: 8 PASS. First run pulls `postgres:16-alpine` (about 15 s on the build box); subsequent runs reuse the layer.
+Expected: 8 PASS. First run pulls `postgres:16-alpine` and `testcontainers/ryuk` (about 15 s on the build box); subsequent runs reuse the layers.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/db.py tests/integration/__init__.py tests/integration/conftest.py tests/integration/test_db_schema.py
+git add backend/db.py tests/integration/__init__.py tests/integration/conftest.py \
+        tests/integration/test_db_schema.py requirements/dev.txt requirements/dev.lock
 git commit -m "Add prediction, review queue, and feedback tables with a bounded engine"
 ```
 
@@ -2265,34 +2274,41 @@ The estimator's semantics are why (a) and (b) must go Phase 3's way rather than 
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `tests/integration/test_db_schema.py`:
+Append to `tests/integration/test_db_schema.py`. `CheckConstraint` joins the existing
+`from sqlalchemy import select` line and `pathlib` the existing top-of-file imports rather
+than being re-imported at the bottom, which would be an `F811` redefinition:
+
 ```python
-from sqlalchemy import CheckConstraint
-from sqlalchemy.exc import IntegrityError
-
-from model.labels import LABELS
-
-
 def test_the_review_queue_sampling_column_has_exactly_one_name(session):
-    """Phase 3's admit_review and seed_demo write sample_rate. A surviving NOT NULL
-    inclusion_probability makes every enqueue a NotNullViolation on the real database."""
+    """Phase 3's admit_review and seed_demo write sample_rate. A surviving NOT NULL column
+    under the retired name makes every enqueue a NotNullViolation on the real database."""
     cols = {c.name for c in ReviewQueue.__table__.columns}
     assert "sample_rate" in cols
-    assert "inclusion_probability" not in cols
+    assert "inclusion" + "_probability" not in cols
 
 
 def test_a_user_report_row_may_carry_a_null_sample_rate(session):
-    """H9's referral path. Horvitz-Thompson must ignore rows of unknown inclusion."""
-    session.add(Prediction(request_id="r1", input_text="x", model_version="m",
-                           decision="allow", max_prob=0.1, latency_ms=5,
-                           persist_status="direct", **{f"prob_{l}": 0.1 for l in LABELS}))
+    """H9's referral path. Horvitz-Thompson must ignore rows of unknown inclusion.
+
+    `input_chars` and `status` are NOT NULL and carry no server default, so an ORM insert
+    that omits them fails on NotNullViolation before the constraint under test is reached.
+    """
+    session.add(Prediction(request_id="r1", input_text="x", input_chars=1, model_version="m",
+                           decision="allow", max_prob=0.1, latency_ms=5, status="ok",
+                           persist_status="direct",
+                           **{f"prob_{label}": 0.1 for label in LABELS}))
     session.add(ReviewQueue(request_id="r1", source="user-report", sample_rate=None,
                             input_text_snapshot="x"))
     session.commit()
+    assert session.get(ReviewQueue, "r1").sample_rate is None
 
 
 def test_a_design_stratum_row_cannot_omit_its_sample_rate(session):
-    with pytest.raises(IntegrityError):
+    """The parent prediction has to exist first: without it the row dies on the foreign key,
+    which is also an IntegrityError, and the test would pass while the CHECK was absent."""
+    insert_prediction(session, make_row(request_id="r2"))
+    session.commit()
+    with pytest.raises(IntegrityError, match="review_queue_sample_rate_ck"):
         session.add(ReviewQueue(request_id="r2", source="flagged", sample_rate=None))
         session.commit()
     session.rollback()
@@ -2319,15 +2335,30 @@ def test_the_schema_entry_point_has_the_name_phase_3_imports():
     assert hasattr(db, "init_db"), "Phase 3's conftest does `from backend.db import init_db`"
 
 
-def test_no_module_in_the_repo_still_says_inclusion_probability():
-    """A rename that misses one call site is a NotNullViolation on day 13, not a lint nit."""
-    import pathlib
+def test_no_module_in_the_repo_still_uses_the_retired_sampling_column_name():
+    """A rename that misses one call site is a NotNullViolation on day 13, not a lint nit.
+
+    The needle is assembled at runtime, and this test's own name avoids it, because a scan
+    whose only possible offender is the scanner can never go green. The repository root is
+    resolved from __file__ rather than from the working directory.
+    """
+    needle = "inclusion" + "_probability"
+    repo = pathlib.Path(__file__).resolve().parents[2]
     offenders = [
-        str(p) for p in pathlib.Path(".").rglob("*.py")
-        if ".venv" not in str(p) and "inclusion_probability" in p.read_text(encoding="utf-8")
+        str(path.relative_to(repo)) for path in repo.rglob("*.py")
+        if ".venv" not in str(path) and "__pycache__" not in path.parts
+        and needle in path.read_text(encoding="utf-8")
     ]
     assert not offenders, offenders
 ```
+
+**Task 10's own tests move with the schema**, in this same commit: `enqueue_review` callers
+pass `sample_rate=`, `test_review_row_records_its_inclusion_probability` becomes
+`test_review_row_records_its_sample_rate` (its old name is itself an offender the scan above
+finds), and `test_feedback_source_is_constrained_to_reviewer_or_user` writes
+`reviewer_id` / `agreement` / `exact_match` instead of `actor_id` / `agree`. A reviewer row
+needs a non-empty `agreement`, or `feedback_reviewer_agreement_ck` rejects it. `backend/audit.py`
+and `tests/unit/test_audit.py` carry the `FLAGGED_SAMPLE_RATE` rename.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -2350,6 +2381,10 @@ class ReviewQueue(Base):
         CheckConstraint(
             "source in ('flagged','random-audit','user-report')", name="ck_review_source"
         ),
+        # ck_review_status is unrelated to this reconciliation and survives unchanged.
+        CheckConstraint(
+            "status in ('pending','rescored','reviewed','expired')", name="ck_review_status"
+        ),
         # A design stratum must carry the π it was drawn with; a user report has no known
         # inclusion probability and must carry NULL, so the estimator skips it until a human
         # reviews it under a known design (premortem H8, H9).
@@ -2369,9 +2404,13 @@ class ReviewQueue(Base):
 ```python
 class Feedback(Base):
     __tablename__ = "feedback"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    request_id: Mapped[str] = mapped_column(String(36), index=True)
-    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    request_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("predictions.request_id"), index=True
+    )
+    ts: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
     source: Mapped[str] = mapped_column(String(16))
     reviewer_id: Mapped[str | None] = mapped_column(String(64))
     agreement: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
@@ -2385,6 +2424,9 @@ class Feedback(Base):
         ),
     )
 ```
+   `text` joins the `sqlalchemy` import list. The BigInteger key, the foreign key and the
+   `ts` index are Task 10's and are kept: Phase 3 adds columns, it does not ask for
+   referential integrity to be dropped.
 
 4. **The entry point.** Rename `init_schema` to `init_db` and keep a one-line alias so no already-written call site in this phase breaks:
 ```python
@@ -2406,7 +2448,7 @@ Expected: the appended 7 PASS, and Task 10's own suite green after the rename.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/db.py tests/integration/test_db_schema.py
+git add backend/db.py backend/audit.py tests/integration/test_db_schema.py tests/unit/test_audit.py
 git commit -m "Reconcile the ORM with the schema Phase 3 consumes: sample_rate, user-report, init_db"
 ```
 
@@ -2455,7 +2497,7 @@ def pending(request_id="r1") -> PendingWrite:
         review=ReviewIntent(
             request_id=request_id,
             source="flagged",
-            inclusion_probability=1.0,
+            sample_rate=1.0,
             input_text_snapshot="you are an idiot",
         ),
     )
@@ -2768,8 +2810,15 @@ pytestmark = pytest.mark.integration
 
 def test_spooled_rows_reach_postgres_when_it_recovers(engine, session, tmp_path):
     spool = Spool(tmp_path / "s.jsonl", max_rows=10)
-    persist_prediction(
-        factory_for(FakeSession(fail=True)), spool, pending("r1"), t0=time.perf_counter()
+    # t0 is placed 31 ms in the past so the request-time measurement is distinguishable from
+    # anything a drain-time stamp could produce: a drain that re-measured would store ~0.
+    # The 31 on `pending()` is a placeholder the live path is SUPPOSED to overwrite, so it
+    # cannot be the expected value here (premortem H28, design decision D5).
+    result = persist_prediction(
+        factory_for(FakeSession(fail=True)),
+        spool,
+        pending("r1"),
+        t0=time.perf_counter() - 0.031,
     )
     assert spool.depth() == 1
 
@@ -2780,7 +2829,9 @@ def test_spooled_rows_reach_postgres_when_it_recovers(engine, session, tmp_path)
     stored = session.scalars(select(Prediction)).all()
     assert len(stored) == 1
     assert stored[0].persist_status == "spooled"
-    assert stored[0].latency_ms == 31          # the value measured at request time, not now
+    # The value measured at request time and reported to the client, not the drain time.
+    assert stored[0].latency_ms >= 31
+    assert stored[0].latency_ms == result.latency_ms
     assert session.get(ReviewQueue, "r1") is not None
 
 
@@ -2958,8 +3009,17 @@ def test_tokens_refill_at_the_configured_rate():
 
 
 def test_refill_is_capped_at_the_burst():
+    """The bucket must be drawn down BEFORE the clock jumps, or the assertion proves nothing.
+
+    A bucket is created holding a full burst, so advancing the clock before the first call
+    leaves `min(burst, tokens + elapsed * rate)` measuring `min(burst, burst + 0)`: the cap
+    could be deleted outright and the sequence would be unchanged. Spending one token first
+    makes the cap load-bearing -- uncapped, 3600 seconds of refill grants 3600 tokens and the
+    fourth call succeeds.
+    """
     clock = FakeClock()
     limiter = RateLimiter(per_minute=60, burst=3, clock=clock)
+    assert limiter.allow("k") is True
     clock.advance(3600.0)
     assert [limiter.allow("k") for _ in range(4)] == [True, True, True, False]
 
@@ -3031,7 +3091,7 @@ class RateLimiter:
         now = self._clock()
         with self._lock:
             if len(self._buckets) >= MAX_TRACKED_KEYS and key not in self._buckets:
-                self._evict(now)
+                self._evict()
             bucket = self._buckets.get(key)
             if bucket is None:
                 bucket = _Bucket(tokens=self.burst, updated=now)
@@ -3045,7 +3105,7 @@ class RateLimiter:
             bucket.tokens -= 1.0
             return True
 
-    def _evict(self, now: float) -> None:
+    def _evict(self) -> None:
         """Drop the least recently seen half. Full buckets are indistinguishable from absent
         ones, so evicting a full bucket grants nothing an attacker did not already have."""
         ordered = sorted(self._buckets.items(), key=lambda item: item[1].updated)
@@ -3105,6 +3165,14 @@ def test_a_prefix_of_the_key_is_rejected():
     assert check_api_key("s3cret", "s3cret-demo-key") is False
 
 
+def test_a_non_ascii_key_is_rejected_rather_than_crashing():
+    """`hmac.compare_digest` raises TypeError on a str holding a codepoint above U+00FF, and
+    Starlette decodes header bytes as latin-1, so an attacker can put one there for free. An
+    unhandled TypeError inside the gate middleware is a 500 with no rejection counted, which
+    turns the auth check into a cheap way to generate server errors."""
+    assert check_api_key("s3cret-demo-k中", "s3cret-demo-key") is False
+
+
 def test_comparison_is_constant_time():
     """A byte-by-byte `==` on a secret is a timing oracle. This asserts the implementation
     uses hmac.compare_digest rather than trying to measure nanoseconds in CI."""
@@ -3150,9 +3218,17 @@ API_KEY_HEADER = "X-API-Key"
 
 
 def check_api_key(presented: str | None, expected: str) -> bool:
+    """Constant-time comparison of the presented header value against the demo key.
+
+    Both sides are encoded first. `hmac.compare_digest` raises TypeError when a `str`
+    argument holds a codepoint above U+00FF, and header values are attacker-controlled, so
+    comparing the raw strings turns any non-Latin-1 key into an unhandled exception inside
+    the gate middleware -- a 500 with no rejection counted. On ASCII keys the encoded and
+    unencoded comparisons are identical, so this costs nothing.
+    """
     if not presented:
         return False
-    return hmac.compare_digest(presented, expected)
+    return hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
 
 
 def client_fingerprint(api_key: str) -> str:
@@ -3167,7 +3243,7 @@ def client_fingerprint(api_key: str) -> str:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `PYTHONHASHSEED=0 .venv/bin/pytest tests/unit/test_auth.py -v`
-Expected: 7 PASS
+Expected: 8 PASS
 
 - [ ] **Step 5: Commit**
 
@@ -3183,9 +3259,19 @@ git commit -m "Add constant-time demo API key check and client fingerprint"
 **Files:**
 - Create: `backend/app.py`, `tests/integration/test_predict_api.py`
 - Amend: `tests/integration/conftest.py` (add the app fixtures)
+- Modify: `requirements/dev.txt`, `requirements/dev.lock`
 - Test: `tests/integration/test_predict_api.py`
 
 **Interfaces produced:** `create_app`, `POST /predict`
+
+**Dependency:** `fastapi.testclient.TestClient` is an httpx client, and no task installs
+httpx — the Tech Stack line names it but Task 2 puts only `fastapi`, `uvicorn`, `sqlalchemy`
+and `psycopg` in `serve.in`, so without this the suite below cannot even be collected. Add
+`httpx==0.27.2` to `requirements/dev.txt`, never to `serve.in`: it is a test dependency and
+`serve.in` builds the production image. Re-lock with `make lock PY=<release 3.11>`;
+`pip-compile` prefers the pins already in `dev.lock`, so this adds `anyio`, `h11`, `httpcore`,
+`httpx` and `sniffio` and moves nothing — and the `anyio` and `h11` it picks match the pins
+`serve.txt` already carries. Install with the usual wheels-only, hash-checked line.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3247,15 +3333,32 @@ def client(app_settings, session):
 import re
 
 import pytest
-from sqlalchemy import select
 
 from backend.db import Prediction, ReviewQueue
+from backend.policy import DecisionResult
 from model.labels import LABELS
 from tests.integration.conftest import AUTH
 
 pytestmark = pytest.mark.integration
 
 HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
+def allow_decision(probs, thresholds):
+    """A deterministic stand-in for `decide` that returns a coherent `allow`.
+
+    The fixture estimator is fitted on eight rows, so which decision any given string draws
+    is an accident of that fit rather than a property under test. Two tests below are about
+    the enqueue branch the app takes GIVEN a decision, so the decision is pinned here instead
+    of hoped for -- the original plan text guarded one of them with
+    `if body["decision"] == "allow":`, and the fixture in fact decides `review` for that
+    string, so the assertion never ran.
+    """
+    return DecisionResult(
+        flags=dict.fromkeys(LABELS, False),
+        decision="allow",
+        max_prob=max(probs.values()),
+    )
 
 
 def test_predict_returns_a_contract_valid_response(client):
@@ -3316,40 +3419,49 @@ def test_no_response_ever_carries_the_artifact_digest(client, artifact_bundle):
 
 
 def test_a_reviewable_prediction_enqueues_a_flagged_review_row(client, session, monkeypatch):
+    # max_prob comes from the probabilities the response also carries. A literal (the plan
+    # originally said 0.8) is rejected by `PredictionResponse._max_prob_is_consistent`, so the
+    # test would have 500'd rather than exercising the enqueue branch.
     monkeypatch.setattr(
         "backend.app.decide",
-        lambda probs, thresholds: __import__("backend.policy", fromlist=["DecisionResult"])
-        .DecisionResult(
+        lambda probs, thresholds: DecisionResult(
             flags={label: label == "toxic" for label in LABELS},
             decision="review",
-            max_prob=0.8,
+            max_prob=max(probs.values()),
         ),
     )
     body = client.post("/predict", json={"text": "you are an idiot"}, headers=AUTH).json()
     assert body["decision"] == "review"
     queued = session.get(ReviewQueue, body["request_id"])
     assert queued.source == "flagged"
-    assert queued.inclusion_probability == 1.0
+    assert queued.sample_rate == 1.0
     assert queued.input_text_snapshot == "you are an idiot"
     assert queued.status == "pending"
 
 
-def test_an_allowed_prediction_does_not_enqueue_when_the_audit_rate_is_zero(client, session):
+def test_an_allowed_prediction_does_not_enqueue_when_the_audit_rate_is_zero(
+    client, session, monkeypatch
+):
+    monkeypatch.setattr("backend.app.decide", allow_decision)
     body = client.post("/predict", json={"text": "have a nice day friend"}, headers=AUTH).json()
-    if body["decision"] == "allow":
-        assert session.get(ReviewQueue, body["request_id"]) is None
+    assert body["decision"] == "allow"
+    assert session.get(ReviewQueue, body["request_id"]) is None
 
 
-def test_random_audit_enqueues_with_its_inclusion_probability(client, session, monkeypatch):
+def test_random_audit_enqueues_with_its_sample_rate(client, session, monkeypatch):
     """H8. The weight has to be on the row, or Phase 3 cannot correct the pooled estimate."""
     from dataclasses import replace
 
+    # `should_random_audit` is only consulted when the decision is neither review nor block.
+    # The fixture decides `review` for this string, so without pinning the decision the row
+    # is enqueued as `flagged` and the test fails on a branch it never meant to take.
+    monkeypatch.setattr("backend.app.decide", allow_decision)
     monkeypatch.setattr("backend.app.should_random_audit", lambda rate, rng: True)
     client.app.state.settings = replace(client.app.state.settings, random_audit_rate=0.05)
     body = client.post("/predict", json={"text": "have a nice day friend"}, headers=AUTH).json()
     queued = session.get(ReviewQueue, body["request_id"])
     assert queued.source == "random-audit"
-    assert queued.inclusion_probability == pytest.approx(0.05)
+    assert queued.sample_rate == pytest.approx(0.05)
 
 
 def test_request_ids_are_unique_per_request(client):
@@ -3364,12 +3476,26 @@ def test_request_ids_are_unique_per_request(client):
 
 def test_severe_toxic_never_appears_without_toxic(client, monkeypatch):
     """H22, end to end. The policy enforces coherence; this asserts nothing downstream
-    reintroduces the incoherent pair."""
+    reintroduces the incoherent pair.
+
+    The thresholds are pinned so that severe_toxic clears its own threshold while toxic does
+    not clear the higher one. That is the only way to reach the incoherent pair once
+    probabilities are hierarchy-clamped, and it is realistic: Phase 1 tunes a threshold per
+    label, so `threshold[toxic] > threshold[severe_toxic]` is an ordinary outcome. The
+    plan originally used probs `toxic=0.02, severe_toxic=0.95` against uniform 0.5
+    thresholds; with the clamp that pair cannot flag severe_toxic at all, and without the
+    clamp `PredictionResponse` refuses it outright.
+    """
+    client.app.state.thresholds = {
+        **dict.fromkeys(LABELS, 0.5),
+        "toxic": 0.9,
+        "severe_toxic": 0.3,
+    }
     monkeypatch.setattr(
         "backend.app.probs_to_dict",
         lambda row: {
-            "toxic": 0.02,
-            "severe_toxic": 0.95,
+            "toxic": 0.50,
+            "severe_toxic": 0.40,
             "obscene": 0.01,
             "threat": 0.01,
             "insult": 0.01,
@@ -3379,6 +3505,26 @@ def test_severe_toxic_never_appears_without_toxic(client, monkeypatch):
     body = client.post("/predict", json={"text": "anything"}, headers=AUTH).json()
     assert body["labels"]["severe_toxic"]["flag"] is True
     assert body["labels"]["toxic"]["flag"] is True
+
+
+def test_a_severe_probability_above_toxic_is_clamped_rather_than_served(client, session):
+    """H22's probability half, and a live defect rather than a hypothetical one.
+
+    `OneVsRestClassifier` fits the six labels independently, so `severe_toxic > toxic` comes
+    out of the real estimator on ordinary input. `PredictionResponse` refuses that pair, so
+    without `enforce_hierarchy` on the serving path the endpoint answers 500 to a benign
+    comment. The clamp runs before `decide`, so the row, the flags and the response all carry
+    the same coherent numbers.
+    """
+    response = client.post(
+        "/predict", json={"text": "my home address is 221b baker street"}, headers=AUTH
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["labels"]["severe_toxic"]["prob"] <= body["labels"]["toxic"]["prob"]
+    stored = session.get(Prediction, body["request_id"])
+    assert stored.prob_severe_toxic <= stored.prob_toxic
+    assert stored.prob_severe_toxic == pytest.approx(body["labels"]["severe_toxic"]["prob"])
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -3412,10 +3558,10 @@ from sqlalchemy import text as sql_text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
-from backend.audit import FLAGGED_INCLUSION_PROBABILITY, should_random_audit
+from backend.audit import FLAGGED_SAMPLE_RATE, should_random_audit
 from backend.auth import API_KEY_HEADER, check_api_key, client_fingerprint
 from backend.config import Settings, load_settings
-from backend.db import PendingWrite, PredictionRow, ReviewIntent, init_schema, make_engine
+from backend.db import PendingWrite, PredictionRow, ReviewIntent, init_db, make_engine
 from backend.model_loader import load_from_settings
 from backend.persistence import persist_prediction
 from backend.policy import decide, load_thresholds
@@ -3423,7 +3569,7 @@ from backend.preprocess import prepare_input
 from backend.ratelimit import RateLimiter
 from backend.schemas import PredictRequest
 from backend.spool import Spool, SpoolFull
-from model.contract import LabelScore, PredictionResponse, probs_to_dict
+from model.contract import LabelScore, PredictionResponse, enforce_hierarchy, probs_to_dict
 from model.labels import LABELS
 
 log = logging.getLogger("backend.request")
@@ -3438,7 +3584,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.session_factory = sessionmaker(
             bind=app.state.engine, expire_on_commit=False
         )
-        init_schema(app.state.engine)
+        init_db(app.state.engine)
         # Startup fails closed: a digest or allowlist violation must stop the container from
         # ever accepting traffic, not surface as a 500 on the first request.
         app.state.model = load_from_settings(settings)
@@ -3491,7 +3637,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         try:
             normalized = prepare_input(payload.text)
-            probs = probs_to_dict(model.predict_proba([normalized])[0])
+            # `enforce_hierarchy` runs here, once, before anything reads the numbers.
+            # OneVsRestClassifier fits the six labels independently, so severe_toxic > toxic
+            # comes out of the real estimator, and PredictionResponse refuses that pair -- so
+            # skipping the clamp is a 500 on ordinary input, not a theoretical incoherence.
+            # Clamping before `decide` keeps the flags, the row and the response consistent
+            # with each other (premortem H22).
+            probs = enforce_hierarchy(probs_to_dict(model.predict_proba([normalized])[0]))
             result = decide(probs, state.thresholds)
         except Exception as exc:  # noqa: BLE001 - every failure must leave a row behind
             failed = PredictionRow(
@@ -3517,14 +3669,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             review = ReviewIntent(
                 request_id=request_id,
                 source="flagged",
-                inclusion_probability=FLAGGED_INCLUSION_PROBABILITY,
+                sample_rate=FLAGGED_SAMPLE_RATE,
                 input_text_snapshot=payload.text,
             )
         elif should_random_audit(state.settings.random_audit_rate, state.rng):
             review = ReviewIntent(
                 request_id=request_id,
                 source="random-audit",
-                inclusion_probability=state.settings.random_audit_rate,
+                sample_rate=state.settings.random_audit_rate,
                 input_text_snapshot=payload.text,
             )
 
@@ -3616,12 +3768,19 @@ def _log(model, row: PredictionRow, outcome, started: float) -> None:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `PYTHONHASHSEED=0 .venv/bin/pytest tests/integration/test_predict_api.py tests/unit/test_probs_to_dict.py -v`
-Expected: 9 integration PASS plus 4 unit PASS. `test_backend_never_re_derives_the_label_zip` is now load-bearing: `backend/app.py` exists and must go through `probs_to_dict`.
+Expected: 10 integration PASS plus 4 unit PASS. `test_backend_never_re_derives_the_label_zip` is now load-bearing: `backend/app.py` exists and must go through `probs_to_dict`.
+
+Confirm the three controls bite before moving on, since all ten pass on the first run: drop
+`enforce_hierarchy` and `test_a_severe_probability_above_toxic_is_clamped_rather_than_served`
+must fail; drop `if flags["severe_toxic"]: flags["toxic"] = True` from `backend/policy.py`
+and `test_severe_toxic_never_appears_without_toxic` must fail; return `model.model_version`
+instead of `model.public_version` and both H14 tests must fail. Restore after each.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/app.py tests/integration/conftest.py tests/integration/test_predict_api.py
+git add backend/app.py tests/integration/conftest.py tests/integration/test_predict_api.py \
+        requirements/dev.txt requirements/dev.lock
 git commit -m "Serve /predict with contract-valid responses and complete prediction logging"
 ```
 
@@ -3665,7 +3824,6 @@ def test_predict_stays_available_when_the_database_is_down(client, engine, sessi
     """H30, the finding this phase exists to close. Under the original design this returns
     503, which hands an attacker an off switch: exhaust a db.t4g.micro's connections and
     moderation is down, not degraded, for as long as the pressure lasts."""
-    healthy = client.app.state.session_factory
     break_the_database(client)
 
     response = client.post("/predict", json={"text": "you are an idiot"}, headers=AUTH)
@@ -3673,8 +3831,12 @@ def test_predict_stays_available_when_the_database_is_down(client, engine, sessi
     assert response.json()["decision"] in {"allow", "review", "block"}
     assert client.app.state.spool.depth() == 1
 
-    client.app.state.session_factory = healthy
-    assert drain_spool(sessionmaker(bind=engine, expire_on_commit=False), client.app.state.spool) == 1
+    # The drainer is handed its own sessionmaker, so restoring the app's broken factory would
+    # be theatre; the client is function-scoped and is not used again after this point.
+    drained = drain_spool(
+        sessionmaker(bind=engine, expire_on_commit=False), client.app.state.spool
+    )
+    assert drained == 1
     stored = session.scalars(select(Prediction)).all()
     assert len(stored) == 1
     assert stored[0].persist_status == "spooled"
@@ -3828,7 +3990,9 @@ def test_rejected_requests_do_not_write_rows(client, session):
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `PYTHONHASHSEED=0 .venv/bin/pytest tests/integration/test_predict_failure_paths.py tests/integration/test_predict_abuse_controls.py -v -m integration`
-Expected: the abuse-control tests PASS immediately (Task 15 wired the gate) and the failure-path tests FAIL — `test_predict_stays_available_when_the_database_is_down` with `assert 503 == 200` if the persistence path was written the way delivery spec §10 described, and `test_failed_prediction_still_writes_a_row` with `assert 0 == 1` if the error path re-raises without persisting. If both pass on the first run, verify by reverting `_persist` to `raise HTTPException(503)` and confirming the failure, then restore.
+Expected: the abuse-control tests PASS immediately (Task 15 wired the gate) and the failure-path tests FAIL — `test_predict_stays_available_when_the_database_is_down` with `assert 503 == 200` if the persistence path was written the way delivery spec §10 described, and `test_failed_prediction_still_writes_a_row` with `assert 0 == 1` if the error path re-raises without persisting.
+
+All fifteen pass on the first run when Task 15 was implemented as written, which means Step 2 proves nothing until each control is knocked out and observed to fail. Five mutations, each restored afterwards, cover the five controls: make `_persist` always raise `SpoolFull` (delivery spec §10's 503-on-any-failure behaviour — four failure-path tests plus two abuse tests go red); drop the `_persist` + `_log` pair from the `except` branch so the error path re-raises without persisting (`test_failed_prediction_still_writes_a_row`); drop the `check_api_key` branch from `_gate` (three abuse tests); drop the limiter branch (two); drop the Content-Length branches (two).
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -3887,7 +4051,11 @@ def test_one_structured_line_per_request(client, caplog):
     assert lines[0]["persist_status"] == "direct"
     assert lines[0]["input_chars"] == 16
     assert lines[0]["latency_ms"] >= 0
-    assert lines[0]["handler_ms"] >= lines[0]["latency_ms"]
+    # `latency_ms` is an integer rounded to the nearest millisecond and `handler_ms` keeps a
+    # decimal, so the honest form of "the handler measured at least as much as persistence"
+    # allows for half a millisecond of rounding. Asserting it strictly is a coin flip on
+    # whichever side of .5 the persistence stamp landed.
+    assert lines[0]["handler_ms"] >= lines[0]["latency_ms"] - 0.5
 
 
 def test_the_log_carries_the_full_digest(client, caplog, artifact_bundle):
@@ -3905,6 +4073,7 @@ def test_the_log_never_carries_raw_user_text(client, caplog):
     with caplog.at_level(logging.INFO, logger="backend.request"):
         client.post("/predict", json={"text": secret}, headers=AUTH)
     rendered = json.dumps(emitted(caplog))
+    assert emitted(caplog), "the scan found no log lines to scan"
     assert secret not in rendered
     assert "221b" not in rendered
 
@@ -3993,11 +4162,12 @@ def test_health_reports_model_version_and_database_readiness(client):
     assert body["spool_depth"] == 0
 
 
-def test_health_never_fingerprints_the_model(client):
+def test_health_never_fingerprints_the_model(client, artifact_bundle):
     """H14. Delivery spec section 6.3 strips the digest here specifically so an attacker
     cannot confirm which artifact is deployed while crafting evasions."""
     response = client.get("/health")
     assert "sha256" not in response.text
+    assert artifact_bundle["digest"] not in response.text
     assert not HEX64.search(response.text)
 
 
@@ -4023,11 +4193,11 @@ def test_health_answers_200_even_while_degraded(client):
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `PYTHONHASHSEED=0 .venv/bin/pytest tests/integration/test_health.py -v -m integration`
-Expected: PASS if Task 15 shipped `/health` as written; otherwise FAIL with `KeyError: 'spool_depth'` or an assertion on `status`. Confirm `test_health_never_fingerprints_the_model` bites by temporarily returning `state.model.model_version` and observing the failure, then restoring `public_version`.
+Expected: PASS if Task 15 shipped `/health` as written; otherwise FAIL with `KeyError: 'spool_depth'` or an assertion on `status`. Confirm all four bite, each mutation restored afterwards: return `state.model.model_version` (two tests go red); delete the `select 1` probe so `database` is hard-coded `"ok"` (`test_health_answers_200_even_while_degraded`); delete the `app.state.rejected[kind] += 1` line from `_reject` (`test_health_exposes_the_rejection_counters`).
 
 - [ ] **Step 3: Write minimal implementation**
 
-`/health` in `backend/app.py` as written in Task 15. Record the deploy-gate contract in the Phase 5 handoff by adding this line to `README.md` under the endpoints section:
+`/health` in `backend/app.py` as written in Task 15. Record the deploy-gate contract in the Phase 5 handoff by adding this line to `README.md` under the endpoints section — which does not exist yet, so create the `## Endpoints` heading here and let Task 22 Step 4 add the runnable `/predict` example beneath it:
 
 ```markdown
 `GET /health` returns 200 with `{"status": "ok" | "degraded", "model_version", "database",
@@ -4090,7 +4260,7 @@ def seed(session, request_id, *, predicted_days_ago, enqueued_days_ago=None, sta
             ReviewIntent(
                 request_id=request_id,
                 source="flagged",
-                inclusion_probability=1.0,
+                sample_rate=1.0,
                 input_text_snapshot="you are an idiot",
                 enqueued_ts=NOW - dt.timedelta(days=enqueued_days_ago),
             ),
@@ -4625,7 +4795,7 @@ def load_from_settings(settings: "Settings") -> LoadedModel: ...
 
 # backend/db.py  (Phase 2 defines; Phase 3 consumes)
 @dataclass(frozen=True) class PredictionRow: ...     # includes status, persist_status, ts
-@dataclass(frozen=True) class ReviewIntent: ...      # source, inclusion_probability, snapshot
+@dataclass(frozen=True) class ReviewIntent: ...      # source, sample_rate, snapshot
 @dataclass(frozen=True) class PendingWrite: prediction: PredictionRow; review: ReviewIntent | None
 def write_pending(session, pending: PendingWrite, stamp) -> int: ...   # returns latency_ms
 def insert_prediction(session, row: PredictionRow) -> None: ...        # idempotent
