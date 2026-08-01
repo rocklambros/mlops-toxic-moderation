@@ -76,7 +76,7 @@ mlops-toxic-moderation/
   requirements/
     base.txt dev.txt train.txt serve.txt   # pinned per surface (Phase 0+)
   .github/workflows/
-    ci.yml                # lint + tests + scans + tf plan gate on PR (Phase 4)
+    ci.yml                # lint + tests + scans + tf fmt/validate on PR (never plan -- premortem H36) (Phase 4)
     deploy.yml            # arm64 build, ECR push, apply, SSM roll (Phase 5)
     runpod-reaper.yml     # scheduled TTL reaper (Phase 1)
   tests/
@@ -263,9 +263,10 @@ def current_reviewer(token, now, secret, reviewer_id) -> str | None: ...
 #      no reviewer_id field, and extra="forbid": the identity comes from the verified session
 # POST /feedback/user  {request_id, verdict}     -> {request_id, verdict}   (no credential)
 
-# rescorer/ -- item 3 on the cut list, imported by nothing above it
-def load_challenger(artifact_dir, expected_sha256, *, model_filename, session,
-                    tokenizer) -> Challenger: ...
+# rescorer/challenger.py -- item 3 on the cut list, imported by nothing above it
+def load_challenger(artifact_dir, expected_sha256, *, model_filename, session, tokenizer) -> Challenger: ...
+
+# rescorer/worker.py
 def drain_once(conn, challenger, batch_size) -> int: ...
 ```
 
