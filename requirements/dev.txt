@@ -4,3 +4,7 @@ ruff==0.7.4
 # Integration tests run against a real Postgres, never SQLite: the schema uses JSONB and
 # ON CONFLICT, and delivery spec section 3.3 makes a real dependency the phase gate.
 testcontainers[postgres]==4.8.2
+# `fastapi.testclient.TestClient` is an httpx client; without this the /predict and /health
+# suites cannot even be collected. Test-only, so it stays out of requirements/serve.in and
+# never reaches the production image.
+httpx==0.27.2
