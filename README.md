@@ -1,114 +1,263 @@
 # mlops-toxic-moderation
 
-Production-grade Toxic Comment Moderation MLOps system. COMP 4450 final project.
+A multi-label toxic comment moderation service, built and operated end to end: experiment
+tracking and a model registry, a FastAPI backend, a managed Postgres database, a user
+interface, a monitoring dashboard on its own server, and a CI gate that blocks merges.
 
-A multi-label classifier (six toxicity labels: `toxic`, `severe_toxic`, `obscene`,
-`threat`, `insult`, `identity_hate`) trained on the Jigsaw English dataset, deployed
-end-to-end on AWS with experiment tracking, a model registry, a served API, a
-human-review workflow, monitoring, and a CI/CD gate.
+Six labels, independent, in this order: `toxic`, `severe_toxic`, `obscene`, `threat`,
+`insult`, `identity_hate`. Trained on the Jigsaw English toxic-comment corpus.
 
-Design: [`docs/2026-07-01-toxic-moderation-mlops-design.md`](docs/2026-07-01-toxic-moderation-mlops-design.md).
-Implementation plan: [`docs/superpowers/plans/2026-07-01-toxic-moderation-master-plan.md`](docs/superpowers/plans/2026-07-01-toxic-moderation-master-plan.md).
+- Experiment tracking: <https://wandb.ai/rocklambros/toxic-moderation>
+- Model registry (promoted stage visible): <https://wandb.ai/rocklambros/toxic-moderation/registry>
+- Model card: [`MODEL_CARD.md`](MODEL_CARD.md) · Security policy: [`SECURITY.md`](SECURITY.md)
+- Design: [`docs/2026-07-01-toxic-moderation-mlops-design.md`](docs/2026-07-01-toxic-moderation-mlops-design.md)
 
-## Endpoints
+## What runs where
 
-`GET /health` returns 200 with `{"status": "ok" | "degraded", "model_version", "database",
-"spool_depth", "rejected"}`. The deploy gate asserts `status == "ok"` per instance; a
-`degraded` status means the process is serving but the database or the spool needs attention.
-It is unauthenticated, and it reports the opaque model version only — never the artifact
-digest.
+| Instance | Class | Component | Port | Public URL |
+|---|---|---|---|---|
+| EC2 #1 | `t4g.medium` | FastAPI backend, `/predict` and `/health` | 8000 | `http://<eip-1>:8000` |
+| EC2 #2 | `t4g.small` | Streamlit user interface | 8501 | `http://<eip-2>:8501` |
+| EC2 #2 | `t4g.small` | Streamlit reviewer queue | 8503 | operator only, never public |
+| EC2 #3 | `t4g.medium` | Monitoring dashboard | 8502 | `http://<eip-3>:8502` |
+| RDS | `db.t4g.micro` | Postgres 16, private subnets | 5432 | no internet path |
 
-### Example request
+Everything is Graviton (`arm64`) in `us-west-2`. There is no SSH and no open port 22;
+operations run over AWS Systems Manager.
+
+The reviewer queue on 8503 is deliberately not on that public list. It writes the metric the
+dashboard is graded on, so no ingress rule of any kind carries it: it binds loopback on the
+instance and is reached through an SSM port-forward session. `infra/exposure.py` is the
+single source of truth for which port is which, and a test holds the Terraform to it.
+
+## Availability window
+
+The stack is stopped between sessions to stay inside a `$100`/month budget, so the public
+URLs answer only while it is up.
+
+**Live for grading: 2026-08-14 through 2026-08-18, 09:00–21:00 US/Mountain (UTC-6).**
+
+Outside that window the Elastic IPs are still allocated and the addresses in this README
+stay correct, but nothing listens on them. Email `rock@rockcyber.com` for a window outside
+these hours and the stack comes up in about six minutes.
+
+## Setup
+
+Local development needs Python 3.11, Docker with Compose v2, and `make`. Nothing here
+touches AWS.
 
 ```bash
-curl -sS -X POST "http://$BACKEND_HOST:8000/predict" \
-  -H 'Content-Type: application/json' \
-  -H "X-API-Key: $DEMO_API_KEY" \
-  -d '{"text":"you are an idiot"}'
+git clone https://github.com/rocklambros/mlops-toxic-moderation.git
+cd mlops-toxic-moderation
+make venv                       # 3.11 venv, hashed lock, --require-hashes
+make lint test                  # ruff + the unit suite
+make data                       # deterministic split + the leakage firewall gate
 ```
 
-```json
-{"request_id":"6f1c...","model_version":"toxic-clf:v3","labels":{"toxic":{"prob":0.87,"flag":true},
-"severe_toxic":{"prob":0.12,"flag":false},"obscene":{"prob":0.44,"flag":false},
-"threat":{"prob":0.03,"flag":false},"insult":{"prob":0.71,"flag":true},
-"identity_hate":{"prob":0.05,"flag":false}},"decision":"review","max_prob":0.87,"latency_ms":42}
-```
-
-`DEMO_API_KEY` is not published here. It travels with the assignment submission and is rotated
-after grading. Comments are capped at 4000 characters, request bodies at 16 KB, and each key is
-limited to 30 requests per minute; requests without a valid key are rejected with 401 before
-the body is parsed.
-
-## Running the whole stack locally
+Bring the whole stack up locally, including Postgres:
 
 ```bash
-docker compose -f infra/docker-compose.yml up -d --build      # five graded components
-docker compose -f infra/docker-compose.yml --profile challenger up -d   # plus the re-scorer
+export DEMO_API_KEY=local-dev-key
+export REVIEWER_SHARED_SECRET=local-dev-secret
+export SUBMITTER_FP_KEY=local-dev-fp-key
+docker compose -f infra/docker-compose.yml up -d --build
 ```
 
 Every credential is an interpolated variable with no default, so a missing one fails the
-`up` rather than starting the reviewer console on a secret nobody chose. The DistilBERT
-re-scorer sits behind the `challenger` profile because it is below the delivery plan's
-cut-line: removing it is a profile that is not selected, with no Terraform edit, no instance
-resize and no failing test.
+`up` rather than starting the reviewer console on a secret nobody chose.
 
-| Surface | Port | Exposure |
-|---|---|---|
-| Backend API | 8000 | Demo ingress |
-| User UI | 8501 | Demo ingress |
-| Monitoring dashboard | 8502 | Demo ingress |
-| Reviewer console | 8503 | **Operator only** — loopback locally, its own security group in AWS, reached over an SSM port forward |
+The user interface is then on <http://localhost:8501>, the dashboard on
+<http://localhost:8502>, and the API on <http://localhost:8000>. The DistilBERT challenger
+is optional and lives behind a profile: `docker compose --profile challenger up -d`.
 
-### Demo dataset and monitoring
+## Example requests
+
+`/predict` takes one comment and returns a calibrated probability and a flag for each of the
+six labels, plus a moderation decision. It requires the demo API key, sent as
+`X-API-Key: $DEMO_API_KEY`; the value is not published in this repository and travels with
+the assignment submission. `/health` needs no key.
+
+**A comment that is allowed:**
+
+```bash
+curl -X POST "http://<eip-1>:8000/predict" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $DEMO_API_KEY" \
+  -d '{"text": "thanks for the thoughtful edit, this reads much better now"}'
+```
+
+```json
+{
+  "request_id": "0f3c1a6e-2b5d-4a71-9f0e-6c2a4d8b1e37",
+  "model_version": "toxic-clf:v3",
+  "labels": {
+    "toxic":         {"prob": 0.02, "flag": false},
+    "severe_toxic":  {"prob": 0.00, "flag": false},
+    "obscene":       {"prob": 0.01, "flag": false},
+    "threat":        {"prob": 0.00, "flag": false},
+    "insult":        {"prob": 0.01, "flag": false},
+    "identity_hate": {"prob": 0.00, "flag": false}
+  },
+  "decision": "allow",
+  "max_prob": 0.02,
+  "latency_ms": 31
+}
+```
+
+**A comment that is flagged and enqueued for human review:**
+
+```bash
+curl -X POST "http://<eip-1>:8000/predict" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $DEMO_API_KEY" \
+  -d '{"text": "you are an absolute clueless idiot and everyone knows it"}'
+```
+
+```json
+{
+  "request_id": "b81d0c44-7a90-4de2-8c19-5f7b3e2a90cc",
+  "model_version": "toxic-clf:v3",
+  "labels": {
+    "toxic":         {"prob": 0.94, "flag": true},
+    "severe_toxic":  {"prob": 0.11, "flag": false},
+    "obscene":       {"prob": 0.38, "flag": false},
+    "threat":        {"prob": 0.01, "flag": false},
+    "insult":        {"prob": 0.89, "flag": true},
+    "identity_hate": {"prob": 0.03, "flag": false}
+  },
+  "decision": "review",
+  "max_prob": 0.94,
+  "latency_ms": 34
+}
+```
+
+**Rejected: the input-size cap.** The cap is `MAX_INPUT_CHARS`, which is 5000 characters,
+and the request schema enforces it before the model is reached. Request bodies are
+separately capped at 16 KB, and each key is limited to 30 requests per minute.
+
+```bash
+curl -i -X POST "http://<eip-1>:8000/predict" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $DEMO_API_KEY" \
+  -d "{\"text\": \"$(python3 -c 'print("a"*5001)')\"}"
+# HTTP/1.1 422 Unprocessable Entity
+```
+
+**Rejected: no key.** Requests without a valid key are refused before the body is parsed.
+
+```bash
+curl -i -X POST "http://<eip-1>:8000/predict" \
+  -H "Content-Type: application/json" -d '{"text": "hello"}'
+# HTTP/1.1 401 Unauthorized
+```
+
+**Readiness, which needs no key and never returns the artifact digest:**
+
+```bash
+curl -sS "http://<eip-1>:8000/health"
+```
+
+```json
+{
+  "status": "ok",
+  "model_version": "toxic-clf:v3",
+  "database": "ok",
+  "spool_depth": 0,
+  "rejected": {"unauthenticated": 0, "rate_limited": 0, "oversize": 0}
+}
+```
+
+`status` is `ok` only when the database answers and the spool is empty; `degraded` means the
+process is serving but one of those needs attention. The deploy gate asserts `ok` on each
+instance. The response carries the opaque model version only, never the artifact digest.
+
+**Through the user interface instead.** Open `http://<eip-2>:8501`, paste a comment, press
+**Check**. The decision and the six per-label probabilities render, and an agree/disagree
+control writes a feedback row that the dashboard's live-accuracy panel reads.
+
+## Deployment
+
+Deployment is a GitHub Actions workflow. There is no manual `docker` step and no SSH.
+
+```
+push to main (code paths only)
+  -> build 5 arm64 images on ubuntu-24.04-arm, tag = git SHA
+  -> push to 4 ECR repositories through the gha-deploy OIDC role
+  -> upload this SHA's instance scripts to s3://$DEPLOY_BUCKET/deploy/<sha>/
+  -> SSM Run Command per component: bash /opt/toxic/bootstrap.sh <sha>
+       assert the invocation count equals the instance count
+       poll every invocation to a terminal state
+       fail on anything but Success and print StandardErrorContent
+  -> curl /health against all three Elastic IPs        <- the real gate
+  -> record /toxic/deploy/previous-sha then current-sha
+```
+
+Infrastructure is separate and never runs unattended. `terraform apply` lives in a
+manually-dispatched workflow, so a documentation commit cannot replace three instances.
+
+Day-to-day operation:
+
+```bash
+make aws-up            # start RDS, then EC2, then the application; gate on /health
+make deploy-verify     # re-run the health gate on its own
+make aws-down          # pg_dump to S3 FIRST, then stop; prints the auto-restart deadline
+make db-restore S3_KEY=db/2026-08-14T18-02-11Z.dump
+make rollback          # re-roll the previous SHA. No Terraform. See infra/ROLLBACK.md
+make aws-destroy       # full teardown; the dump is already in S3
+```
+
+`make aws-down` dumps before it stops because a stopped RDS instance **restarts by itself
+after seven days**, and the alternative remedy — destroying it — would delete the dataset
+the graded dashboard is built on. There is no teardown path that skips the dump.
+
+## Repository layout
+
+```
+model/        data pipeline, leakage firewall, training, registry, thresholds
+backend/      FastAPI, safe skops loader, moderation policy, persistence, retention
+frontend/     Streamlit user interface and the separate reviewer queue
+monitoring/   Streamlit dashboard: latency, target drift, live accuracy
+rescorer/     optional DistilBERT ONNX challenger worker
+infra/        Terraform, bootstrap, compose, deploy and operations scripts
+scripts/      operator tools: held-out export, demo seeding, evidence redaction
+docs/         design specs, plans, runbooks, evidence
+```
+
+## The demo dataset behind the dashboard
 
 The monitoring dashboard is populated by `make seed-demo`, which replays roughly 2,000
 comments from the **locked held-out split** through `/predict` and back-dates their
 timestamps across 14 days. Predictions are real and their latency is measured; only the
-timestamp is written by the operator tool. Every seeded row carries
-`predictions.is_seed = true` and every seeded review carries `reviewer_id = 'seed-replay'`,
-and the dashboard states how many of the displayed rows are seeded.
-
-Two things the seeder needs from the operator, both deliberate:
-
-- It replays through the real `/predict` route from one peer address, so the backend's rate
-  limit has to be raised for the duration (`RATE_LIMIT_PER_MINUTE`, `RATE_LIMIT_BURST` on
-  the backend service) and lowered again afterwards. The seeder does not retry around a 429:
-  an abuse control that a tool quietly works around is not a control.
-- It exits non-zero unless the resulting dataset would leave every graded panel non-
-  degenerate, and one of those criteria is a non-empty random-audit stratum. The audit
-  samples the traffic the model *allows*, so it stays empty until a model that allows some
-  traffic is promoted. That refusal is the criterion working, not a bug in the seeder.
+timestamp is written by the operator tool. Every seeded row carries `predictions.is_seed =
+true` and every seeded review carries `reviewer_id = 'seed-replay'`, and the dashboard
+states how many of the displayed rows are seeded.
 
 Live accuracy is a Horvitz-Thompson estimate over two probability-sampled strata: every
-flagged item is reviewed (inclusion probability 1.0) and a `RANDOM_AUDIT_RATE` fraction of
-the rest is audited. The inclusion probability is stored on each `review_queue` row at
-enqueue time, so the estimate stays sound when the rate is changed. Per-stratum counts and a
-95% Wilson interval are shown alongside the point estimate.
+flagged item is reviewed, and a `RANDOM_AUDIT_RATE` fraction of the rest is audited. The
+inclusion probability is stored on each `review_queue` row at enqueue time, so the estimate
+stays sound when the rate is changed. User feedback from the agree/disagree control is
+collected and displayed with its own interval, but is deliberately **excluded** from that
+estimate: a self-selected click has no known inclusion probability, and a graded metric must
+not be writable by an anonymous visitor.
 
-User feedback (the agree/disagree control on the user UI) is collected, stored with
-`feedback.source = 'user'`, and displayed with its own n and interval. It is deliberately
-**excluded** from the live-accuracy estimate, because a self-selected click has no known
-inclusion probability and because a graded metric must not be writable by an anonymous
-visitor. A disagreement instead refers the comment to a human reviewer.
+The dashboard connects as `monitoring_ro`, a role holding `SELECT` and nothing else.
 
-The dashboard connects as `monitoring_ro`, a role holding `SELECT` and nothing else
-(`infra/postgres-init/02-monitoring-role.sql`). It reads every number it displays out of the
-database; the only files it opens are the pinned `thresholds.json` and
-`baseline_flag_rates.json`, which are model artifacts fetched and digest-verified with the
-model rather than metrics handed to it by another process.
+## Data handling and retention
 
-### The DistilBERT challenger
+`/predict` stores the submitted comment in `predictions.input_text`. A scheduled purge
+nulls it after `INPUT_TEXT_RETENTION_DAYS` (default 30) and keeps the rest of the row for
+monitoring. Raw comment text is never written to Weights & Biases, to application logs, or
+to any screenshot in this repository. The review queue keeps its own snapshot so a purge
+cannot destroy a reviewer's evidence mid-workflow, and that snapshot has its own hard TTL.
 
-The re-scorer reads the review queue and writes a second opinion onto each item, which the
-reviewer console shows beside the production model's scores. The artifact is refused at load
-unless it passes four gates: SHA-256 against the digest of record, `problem_type ==
-"multi_label_classification"`, `id2label` in exactly the project's label order, and logit
-parity against a fixture shipped with the export.
+## Cost
 
-**The currently valid artifact is the float32 ONNX export.** Its int8 sibling exists and is
-refused by the parity gate — the quantizer ran per-tensor and targeted the exporting host's
-architecture rather than the arm64 serving fleet. Both causes are fixed but not yet proven by
-a passing re-export, so the worker runs float32 until one lands. Promoting the re-export is
-`CHALLENGER_MODEL_FILE` and `CHALLENGER_SHA256`, not a code change.
+About `$0.10/hour` with all three instances and RDS running, against a `$100`/month budget
+with alerts at 50, 80, and 100 percent. A service control policy denies every instance type
+outside a four-entry Graviton allowlist, which is a hard denial rather than an alert.
 
-This README is a placeholder. The operator-facing README lands in the final phase.
+## Licence and provenance
+
+Course project for COMP 4450. The Jigsaw corpus is public research data owned by others and
+is not redistributed here. Model limitations, fairness measurements, and the adversarial
+exposure created by publishing the registry are documented in [`MODEL_CARD.md`](MODEL_CARD.md).
