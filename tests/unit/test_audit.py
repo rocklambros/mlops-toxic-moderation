@@ -2,11 +2,11 @@ import random
 
 import pytest
 
-from backend.audit import FLAGGED_INCLUSION_PROBABILITY, should_random_audit
+from backend.audit import FLAGGED_SAMPLE_RATE, should_random_audit
 
 
 def test_flagged_rows_are_sampled_with_certainty():
-    assert FLAGGED_INCLUSION_PROBABILITY == 1.0
+    assert FLAGGED_SAMPLE_RATE == 1.0
 
 
 def test_rate_zero_never_audits():

@@ -4,10 +4,15 @@ Rubric 2.2 requires every prediction request, its output, and a timestamp to be 
 rubric 3.2's dashboard is built on these tables, so the schema carries the columns the
 monitoring queries need rather than the columns the request happens to have. Three of them
 exist because of specific premortem findings: `review_queue.source` and
-`review_queue.inclusion_probability` (H8), `review_queue.input_text_snapshot` (the retention
-purge nulls `predictions.input_text` and review must not depend on it), and
+`review_queue.sample_rate` (H8), `review_queue.input_text_snapshot` (the retention purge
+nulls `predictions.input_text` and review must not depend on it), and
 `predictions.status` / `persist_status` (H28 and H30 - failed and degraded requests write
 rows so the latency tail is present in the series).
+
+This is the one definition of the three tables. Phase 3 consumes exactly these names -
+`sample_rate`, `source='user-report'`, `feedback(reviewer_id, agreement, exact_match)`,
+`init_db` - so a divergence here is a runtime failure on the deployed database rather than
+a style disagreement (gap IFACE-DB-SCHEMA).
 """
 
 import datetime as dt
@@ -26,6 +31,7 @@ from sqlalchemy import (
     create_engine,
     func,
     select,
+    text,
     update,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -35,8 +41,12 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from model.labels import LABELS
 
-REVIEW_SOURCES = ("flagged", "random-audit", "user")
+# `review_queue.source` and `feedback.source` are different vocabularies and both survive:
+# a review row arrives from a design stratum or from a user's referral, whereas a feedback
+# row is authored by a reviewer or by a user.
+REVIEW_SOURCES = ("flagged", "random-audit", "user-report")
 REVIEW_STATUSES = ("pending", "rescored", "reviewed", "expired")
+FEEDBACK_SOURCES = ("reviewer", "user")
 
 
 class Base(DeclarativeBase):
@@ -90,7 +100,7 @@ class ReviewQueue(Base):
         DateTime(timezone=True), server_default=func.now(), index=True
     )
     source: Mapped[str] = mapped_column(String(16))
-    inclusion_probability: Mapped[float] = mapped_column(Float)
+    sample_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
     input_text_snapshot: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(10), default="pending", index=True)
     distilbert_probs: Mapped[dict | None] = mapped_column(JSONB)
@@ -99,13 +109,20 @@ class ReviewQueue(Base):
     reviewed_ts: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
-        CheckConstraint("source in ('flagged','random-audit','user')", name="ck_review_source"),
+        CheckConstraint(
+            "source in ('flagged','random-audit','user-report')", name="ck_review_source"
+        ),
         CheckConstraint(
             "status in ('pending','rescored','reviewed','expired')", name="ck_review_status"
         ),
+        # A design stratum must carry the pi it was drawn with; a user report has no known
+        # inclusion probability and must carry NULL, so the estimator skips it until a human
+        # reviews it under a known design (premortem H8, H9).
         CheckConstraint(
-            "inclusion_probability > 0 and inclusion_probability <= 1",
-            name="ck_review_inclusion_probability",
+            "(source in ('flagged','random-audit')"
+            " AND sample_rate IS NOT NULL AND sample_rate > 0 AND sample_rate <= 1)"
+            " OR (source = 'user-report' AND sample_rate IS NULL)",
+            name="review_queue_sample_rate_ck",
         ),
     )
 
@@ -120,13 +137,20 @@ class Feedback(Base):
     ts: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
-    source: Mapped[str] = mapped_column(String(10))
-    actor_id: Mapped[str | None] = mapped_column(String(64))
-    agree: Mapped[bool | None] = mapped_column(Boolean)
-    true_labels: Mapped[dict | None] = mapped_column(JSONB)
-    model_labels: Mapped[dict | None] = mapped_column(JSONB)
+    source: Mapped[str] = mapped_column(String(16))
+    reviewer_id: Mapped[str | None] = mapped_column(String(64))
+    agreement: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    exact_match: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
 
-    __table_args__ = (CheckConstraint("source in ('reviewer','user')", name="ck_feedback_source"),)
+    __table_args__ = (
+        CheckConstraint("source in ('reviewer','user')", name="ck_feedback_source"),
+        # A reviewer row exists to record per-label agreement. An empty object is the shape a
+        # dashboard silently reads as "no disagreement", so the write is refused instead.
+        CheckConstraint(
+            "source <> 'reviewer' OR agreement <> '{}'::jsonb",
+            name="feedback_reviewer_agreement_ck",
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -150,7 +174,7 @@ class PredictionRow:
 class ReviewIntent:
     request_id: str
     source: str
-    inclusion_probability: float
+    sample_rate: float | None
     input_text_snapshot: str | None
     enqueued_ts: dt.datetime | None = None
 
@@ -179,8 +203,12 @@ def make_engine(settings) -> Engine:
     )
 
 
-def init_schema(engine: Engine) -> None:
+def init_db(engine: Engine) -> None:
+    """Idempotent create of the three tables. Named for the seam Phase 3 imports."""
     Base.metadata.create_all(engine)
+
+
+init_schema = init_db  # historical name used inside Phase 2; both are the same function
 
 
 def insert_prediction(session, row: PredictionRow) -> None:
@@ -211,7 +239,7 @@ def enqueue_review(session, intent: ReviewIntent) -> None:
     values = {
         "request_id": intent.request_id,
         "source": intent.source,
-        "inclusion_probability": intent.inclusion_probability,
+        "sample_rate": intent.sample_rate,
         "input_text_snapshot": intent.input_text_snapshot,
         "status": "pending",
     }
