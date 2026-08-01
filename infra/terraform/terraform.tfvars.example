@@ -1,0 +1,54 @@
+# The two inputs that have NO default and therefore MUST be supplied.
+#
+# Both omissions are deliberate (see variables.tf): an ingress allowlist with a
+# default is one nobody sets, and a committed email address in a public
+# repository is spam bait. The consequence is equally real and is the reason
+# this file exists: `terraform plan -input=false` and `terraform apply
+# -input=false -auto-approve` FAIL with
+#
+#   Error: No value for required variable ... "operator_cidrs" / "alert_email"
+#
+# unless the values are supplied. Terraform prompts for them when a TTY is
+# attached, so the failure only appears in the non-interactive path -- an agent,
+# a make recipe, a CI job -- which is exactly where it is most expensive.
+#
+# Supply them in whichever of the three ways suits the caller. All are equivalent:
+#
+#   1. This file, copied and filled in. It is NOT auto-loaded (only *.auto.tfvars
+#      and a file literally named terraform.tfvars are), so name the copy
+#      terraform.tfvars or pass it explicitly:
+#        cp terraform.tfvars.example terraform.tfvars   # then edit
+#        terraform -chdir=infra/terraform apply -input=false
+#      terraform.tfvars must be gitignored before it holds a real address.
+#
+#   2. Environment variables, which leave nothing on disk and are the right shape
+#      for an automated apply:
+#        export TF_VAR_operator_cidrs="[\"$(curl -fsS https://checkip.amazonaws.com)/32\"]"
+#        export TF_VAR_alert_email='you@example.com'
+#
+#   3. Flags, one run at a time:
+#        terraform -chdir=infra/terraform apply -input=false \
+#          -var "operator_cidrs=[\"$(curl -fsS https://checkip.amazonaws.com)/32\"]" \
+#          -var alert_email=you@example.com
+#
+# The pinned AMI is the third variable with no default; it is already supplied by
+# the committed ami.auto.tfvars, which IS auto-loaded. Nothing else is required.
+
+# The always-on ingress allowlist for ports 8000, 8501 and 8502. Your address and
+# nothing else. Validated: at least one entry, valid CIDRs, /24 or narrower --
+# 0.0.0.0/0 is rejected here on purpose. Widening for a demo is var.demo_cidrs,
+# which is a separate, visible, revertible edit.
+operator_cidrs = ["203.0.113.7/32"]
+
+# Subscribed to the SNS topic that carries budget thresholds, the health alarms
+# and root-usage events. The subscription is created in PendingConfirmation and
+# stays there until the link in the confirmation mail is clicked; `terraform
+# apply` reports success either way, so confirm it and prove one delivery before
+# believing anything pages.
+alert_email = "you@example.com"
+
+# Optional, shown with their defaults so the knobs that matter are visible:
+#
+# demo_cidrs           = []          # ["0.0.0.0/0"] only while a grader is looking
+# nightly_stop_enabled = true        # false for the grading window, then true again
+# monthly_budget_usd   = 100

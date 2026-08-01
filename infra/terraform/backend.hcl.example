@@ -1,0 +1,26 @@
+# Partial backend configuration for `terraform init`.
+#
+# backend.tf deliberately omits `bucket`: the bucket is named
+# rockcyber-mlops-toxic-tfstate-<ACCOUNT_ID> and this repository is public, so
+# committing it would publish the member account id. `terraform init` with no
+# -backend-config and no bucket PROMPTS, which is a hang rather than an error in
+# any non-interactive context -- a CI job, a `make` recipe, or an agent.
+#
+# Copy this file to backend.hcl (which must be gitignored) and fill in the value
+# from the gitignored infra/aws/bootstrap-outputs.env:
+#
+#   sed "s|REPLACE_WITH_TF_STATE_BUCKET|$(. infra/aws/bootstrap-outputs.env; echo "$TF_STATE_BUCKET")|" \
+#     infra/terraform/backend.hcl.example > infra/terraform/backend.hcl
+#   terraform -chdir=infra/terraform init -input=false -backend-config=backend.hcl
+#
+# Equivalently, with no file at all:
+#
+#   set -a; . infra/aws/bootstrap-outputs.env; set +a
+#   terraform -chdir=infra/terraform init -input=false \
+#     -backend-config="bucket=$TF_STATE_BUCKET"
+#
+# `region` is the region the STATE BUCKET lives in, established by Phase A1. It
+# is independent of var.region and does not move if the workload ever does.
+
+bucket = "REPLACE_WITH_TF_STATE_BUCKET_FROM_infra/aws/bootstrap-outputs.env"
+region = "us-west-2"

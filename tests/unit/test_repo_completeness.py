@@ -42,6 +42,11 @@ def test_no_gitignore_directory_pattern_can_match_a_nested_source_directory():
     nestable_by_design = {
         "__pycache__/", ".pytest_cache/", ".ruff_cache/", ".mypy_cache/",
         "htmlcov/", ".idea/", ".vscode/", "*.egg-info/",
+        # Terraform writes a .terraform/ provider cache into every directory it is
+        # init'd in, so anchoring this one to the root would be the wrong fix: the day a
+        # submodule appears, its cache would be committed. Justified rather than anchored,
+        # which is what the rule in this test's docstring asks for.
+        ".terraform/",
     }
     offenders = []
     for line in (REPO / ".gitignore").read_text().splitlines():
