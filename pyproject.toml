@@ -12,11 +12,21 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# So `scripts/` is importable by the tests that exercise it, whatever the invocation.
+pythonpath = ["."]
 # --strict-markers turns a typo'd mark into a collection error. Without it a mistyped
 # `integration` mark is only a warning, and the test it was meant to gate runs in the unit
-# job, where there is no Postgres.
-addopts = "-q --strict-markers"
+# job, where there is no Postgres. --strict-config does the same for a typo'd ini key, which
+# otherwise silently keeps the default.
+addopts = "-q --strict-markers --strict-config"
+# The single declaration of record. Under --strict-markers a marker that is used and not
+# declared is a COLLECTION error, so one @pytest.mark.perf in a file nobody re-reads takes
+# the whole suite down -- `make test` and `make loadtest` with it.
+# tests/unit/test_test_harness.py::test_every_marker_used_in_the_tree_is_declared is what
+# catches a fifth marker appearing later.
 markers = [
-    "integration: needs external services (deselect with -m 'not integration')",
-    "perf: measures latency against a real database (deselect with -m 'not perf')",
+    "unit: no external services; applied automatically to tests/unit",
+    "integration: needs external services, applied automatically to tests/integration (deselect with -m 'not integration')",
+    "perf: measures latency against a real database, applied automatically to tests/perf (deselect with -m 'not perf')",
+    "awsapply: needs a real AWS session; never runs in pull-request CI (premortem H36)",
 ]
