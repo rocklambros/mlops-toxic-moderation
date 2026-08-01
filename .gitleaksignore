@@ -6,8 +6,20 @@
 # to that directory tomorrow would scan clean. Nothing here can do that -- edit the line and
 # the fingerprint changes, and the scan goes red again.
 #
-# 1. `ghp_0123456789abcdefghijklmnopqrstuvwxyzA` is the sequential-alphabet placeholder in
-#    Phase 5's plan, inside a test asserting that the evidence redactor MASKS a GitHub token.
-#    The document has to contain a token-shaped string in order to specify redacting one.
-#    It has never been a credential: the body is `0123456789abcdefghijklmnopqrstuvwxyz`.
+# 1. A GitHub personal-access-token placeholder in Phase 5's plan, inside a test asserting
+#    that the evidence redactor MASKS such a token. The document has to contain a
+#    token-shaped string in order to specify redacting one. It has never been a credential:
+#    its body is the digits then the lowercase alphabet, in order.
+#
+#    Deliberately NOT quoted here. Writing the literal string in this file made gitleaks
+#    flag THIS file -- the suppression became a finding, because a text scanner cannot tell
+#    an example from an instance. That is the sixth time in this repository a scanner has
+#    matched the prose explaining it, so: describe the shape, never paste the sample.
 5446f1a6478b0f174451b1b7d2e69340f40e8949:docs/superpowers/plans/2026-07-31-phase-5-deploy-docs.md:github-pat:711
+
+# 2. The same placeholder, as it appeared in an earlier revision of THIS file. gitleaks
+#    scans history, so removing the literal from the working copy does not remove it from
+#    the commit that carried it. Fingerprinted rather than history-rewritten: rewriting
+#    history to erase a string that was never a credential would invalidate every other
+#    fingerprint here and every commit sha quoted in the docs.
+d1169754dff12f962417011b522f8cf731b44c2a:.gitleaksignore:github-pat:9
