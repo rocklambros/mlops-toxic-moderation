@@ -1,0 +1,17 @@
+# The artifact-bake surface: infra/deploy/Dockerfile.artifacts and nothing else.
+#
+# Its own lock, deliberately. `wandb` is the ONE dependency in this repository whose install
+# would otherwise happen unhashed, and it is the dependency of the one image that ever holds
+# a credential -- fetching the registry client without hash verification, inside the build
+# that mounts WANDB_API_KEY, is the exact circularity premortem C11 is about, pointed at the
+# worst possible target.
+#
+# It is NOT folded into requirements/dev.lock: nothing in the test suite imports wandb (the
+# tracking module's calls are injected through `artifact_factory`), and the closure below
+# drags in gitpython, protobuf, sentry-sdk and psutil, none of which belong in the
+# environment the unit job installs.
+#
+# It is also NOT installed by any serving image. The serving path fetches the artifact at
+# deploy time through infra/deploy/instance/fetch_artifacts.sh, under the instance profile,
+# with no registry client on the box at all.
+wandb==0.18.5

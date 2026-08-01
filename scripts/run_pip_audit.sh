@@ -9,7 +9,7 @@
 # installs anywhere: the `.in` and `.txt` inputs are human-edited requests, and auditing them
 # would audit the direct dependencies while missing the transitive ones that carry most
 # advisories. tests/unit/test_vuln_ledger.py discovers the locks independently and fails if
-# one of them is absent from this list, so a seventh surface cannot arrive unaudited.
+# one of them is absent from this list, so a ninth surface cannot arrive unaudited.
 set -euo pipefail
 
 LOCKS=(
@@ -20,6 +20,7 @@ LOCKS=(
   requirements/monitor.txt
   requirements/rescorer.txt
   requirements/security.txt
+  requirements/artifacts.txt
 )
 
 # NOT `mapfile -t IGNORED < <(python -m scripts.vuln_ledger)`. A process substitution's exit

@@ -124,7 +124,7 @@ ui-lock: check-py
 	  --output-file requirements/ui.txt requirements/ui.in
 	rm -rf .venv-lock
 
-.PHONY: monitor-lock rescorer-lock security-lock
+.PHONY: monitor-lock rescorer-lock security-lock artifacts-lock
 
 # The scanners. Their own surface, so a semgrep resolution failure on aarch64 cannot stop
 # the test suite from being lockable (see the header of requirements/security.in).
@@ -143,6 +143,18 @@ monitor-lock: check-py
 	.venv-lock/bin/pip install --require-hashes --only-binary=:all: -r requirements/pip-tools.txt
 	PIP_ONLY_BINARY=:all: .venv-lock/bin/pip-compile --generate-hashes \
 	  --output-file requirements/monitor.txt requirements/monitor.in
+	rm -rf .venv-lock
+
+# The artifact-bake image (infra/deploy/Dockerfile.artifacts), and nothing else. It is the
+# one image in this project that ever holds WANDB_API_KEY, so installing the registry client
+# there without hash verification would be premortem C11 pointed at the worst possible
+# target: fetching the client without integrity checking, inside the build that mounts the
+# credential. Its own surface, because nothing in the test environment imports wandb.
+artifacts-lock: check-py
+	$(PY) -m venv .venv-lock
+	.venv-lock/bin/pip install --require-hashes --only-binary=:all: -r requirements/pip-tools.txt
+	PIP_ONLY_BINARY=:all: .venv-lock/bin/pip-compile --generate-hashes --allow-unsafe \
+	  --output-file requirements/artifacts.txt requirements/artifacts.in
 	rm -rf .venv-lock
 
 # The challenger re-scorer. Installed by nothing else, so cutting it (ordered cut list item
