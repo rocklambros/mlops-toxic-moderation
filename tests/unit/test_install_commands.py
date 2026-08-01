@@ -18,6 +18,7 @@ that SEARCH_ROOTS actually reaches all of it, so a new `tools/setup.sh` cannot i
 unhashed simply by living somewhere nobody listed.
 """
 
+import ast
 import re
 from pathlib import Path
 
@@ -51,6 +52,33 @@ def candidate_files() -> list[Path]:
     return sorted(set(found))
 
 
+def executable_text(path: Path, text: str) -> str:
+    """Strip docstrings and comments from Python sources before scanning them.
+
+    A raw-text scan matches its own prose. `infra/runpod/deploy_runpod.py` explains in a
+    docstring why the readiness probe cannot be trusted until `pip install` has finished, and
+    that sentence was reported as an unhashed install command. This is the fifth time in this
+    repository that a text scan has flagged the documentation of the rule it enforces, and the
+    failure mode is worse than a false positive: a scanner that cries wolf on comments is a
+    scanner someone deletes.
+
+    Only Python is parsed, because only Python has a docstring construct the scanner can
+    confuse for a command. Shell, Dockerfiles and YAML are scanned whole -- a `#`-commented
+    install there is still an install someone can uncomment.
+    """
+    if path.suffix != ".py":
+        return text
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return text  # unparseable: scan it whole rather than silently skipping it
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            if isinstance(node.value.value, str):
+                node.value.value = ""
+    return ast.unparse(tree)
+
+
 def install_commands(text: str) -> list[str]:
     """Join backslash continuations so a flag on the next line still counts as the same
     command. Without this, `--require-hashes` on line two reads as a different command."""
@@ -62,7 +90,9 @@ def scanned_commands() -> list[tuple[Path, str]]:
     return [
         (path, command)
         for path in candidate_files()
-        for command in install_commands(path.read_text(encoding="utf-8", errors="replace"))
+        for command in install_commands(
+            executable_text(path, path.read_text(encoding="utf-8", errors="replace"))
+        )
     ]
 
 
@@ -108,15 +138,55 @@ def test_no_install_command_in_this_repository_escapes_the_scan():
     )
 
 
+# The one install that does not run on a machine this repository controls. It is named as a
+# path, not a pattern, so widening it is a visible diff rather than a quiet regex edit.
+REMOTE_HOST_BOOTSTRAP = Path("infra/runpod/deploy_runpod.py")
+
+
 def test_no_install_command_escapes_require_hashes():
     offenders = [
         f"{path}: {command.strip()}"
         for path, command in scanned_commands()
-        if "--require-hashes" not in command
+        if "--require-hashes" not in command and path != REMOTE_HOST_BOOTSTRAP
     ]
     assert not offenders, (
         "these installs run without hash verification on a box holding live credentials "
         "(premortem C11):\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_the_remote_host_exemption_is_one_file_and_stays_small():
+    """Scope, stated rather than assumed -- the same treatment `docs/` and `tests/` get above.
+
+    The RunPod bootstrap installs onto a rented, ephemeral host whose base image we do not
+    build and which already ships hundreds of unverified packages (torch, CUDA, cuDNN).
+    `--require-hashes` there would need the whole transitive closure pinned for linux/x86_64,
+    resolvable only on an x86 machine -- and `--no-deps` is not a shortcut, because the image
+    lacks pyarrow, xxhash and gitpython among others, so the run would fail at import.
+    Hashing our fourteen additions while the floor underneath them is unverified would move
+    the number, not the risk.
+
+    What actually bounds that host: it holds one revocable credential (WANDB_API_KEY, not the
+    AWS, Kaggle or RunPod keys), it self-terminates on a three-hour dead-man switch, and it is
+    destroyed after the run.
+
+    This test is the thing that keeps the exemption honest. It fails if the exemption grows a
+    second file, and it fails if that file starts installing something other than the pod
+    bootstrap -- so the boundary cannot drift into the code that runs on our own machines.
+    """
+    exempt = [
+        command.strip()
+        for path, command in scanned_commands()
+        if path == REMOTE_HOST_BOOTSTRAP and "--require-hashes" not in command
+    ]
+    assert exempt, (
+        "the remote-host exemption matches nothing. Either the bootstrap now verifies hashes "
+        "-- in which case delete the exemption -- or the scanner stopped seeing it."
+    )
+    assert len(exempt) == 1, f"the exemption covers more than the one bootstrap install: {exempt}"
+    assert "--upgrade pip" not in exempt[0], (
+        "the exemption is for installing the pinned workload wheels onto a rented host, never "
+        "for bootstrapping pip itself, which is the circularity this control exists to remove"
     )
 
 
