@@ -9,7 +9,7 @@
 #
 #   network.tf   ports, public_cidrs, private_cidrs
 #   ecr.tf       components
-#   compute.tf   ecr_registry, compose_version
+#   compute.tf   ecr_registry, backend_internal_url
 #   budget.tf    budget_notifications
 #
 # Nothing in this file may re-declare any of those, and nothing added to those
