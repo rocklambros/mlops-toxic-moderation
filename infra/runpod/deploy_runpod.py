@@ -284,9 +284,40 @@ class FinetuneSpec:
     def classical_command(
         self, *, cache_dir: str = REMOTE_CACHE_DIR, output_dir: str = REMOTE_OUTPUT_DIR
     ) -> str:
+        """The classical CV and threshold tuning, tracked, in `run_phase1.py`'s own vocabulary.
+
+        `POD_ENV_SHIM` is here for the same reason it is on `train_command`, and leaving it off
+        was not cosmetic: RunPod hands the pod payload's `env` to the container's PID 1, an
+        `sshd` session inherits none of it, and `run_phase1.start_run` would then reach for
+        `pass`, which a pod does not have. Every launch on 2026-07-31 was created with a valid
+        `WANDB_API_KEY` and logged zero runs. `--require WANDB_API_KEY` makes that failure cost
+        one second instead of the whole cross-validation, and rubric 1.2 is graded on the run
+        page that key is what creates.
+
+        The `PHASE1_*` assignments sit *outside* the shim because they are settings for the
+        final process, not secrets to be recovered from PID 1; `execvp` carries them through.
+        """
         return (
-            f"PYTHONHASHSEED=0 PHASE1_CACHE={shlex.quote(cache_dir)} "
-            f"PHASE1_OUT={shlex.quote(output_dir)} python run_phase1.py cv thresholds"
+            f"PHASE1_CACHE={shlex.quote(cache_dir)} PHASE1_OUT={shlex.quote(output_dir)} "
+            + " ".join(POD_ENV_SHIM)
+            + " --require WANDB_API_KEY -- python run_phase1.py cv thresholds"
+        )
+
+    def classical_retrieval_command(
+        self, *, cache_dir: str = REMOTE_CACHE_DIR, output_dir: str = REMOTE_OUTPUT_DIR
+    ) -> str:
+        """Move the out-of-fold probabilities into the directory `fetch_checkpoint` pulls.
+
+        `run_phase1.stage_cv` checkpoints each fold and the merged out-of-fold matrix into
+        `PHASE1_CACHE` -- the delivered bundle directory -- and not into `PHASE1_OUT`, because
+        that is what makes a killed run resumable. `fetch_checkpoint` copies `PHASE1_OUT`, so
+        without this the metrics would come home and the 150 fits that produced them would die
+        with the pod's disk. Re-tuning thresholds on this machine without paying for the CV a
+        second time is the whole point of keeping them.
+        """
+        return (
+            f"cp -f {shlex.quote(cache_dir)}/oof.npz {shlex.quote(cache_dir)}/fold_*.npz "
+            f"{shlex.quote(output_dir)}/"
         )
 
     def train_command(
@@ -973,8 +1004,28 @@ def deliver_dataset(
     seed, which would invalidate the comparison silently. The bundle is built once on the
     Jetson and shipped as bytes.
     """
-    if not Path(local_path).exists():
+    local_path = Path(local_path)
+    if not local_path.exists():
         raise LaunchError(f"dataset bundle not found: {local_path}")
+    # `scp -r <local> <remote_dir>/` lands the directory under its own basename, and both
+    # `PHASE1_CACHE` and the trainer's `--cache` name `REMOTE_CACHE_DIR` -- a constant ending
+    # in `/bundle`. Handing this the staging *parent* therefore delivers a real bundle to
+    # `/workspace/data/pod-bundle` and leaves the run looking for one that is not there, which
+    # is a failure the far side can only report after the GPU is billing. It costs two stat
+    # calls to find here instead.
+    expected = Path(REMOTE_CACHE_DIR).name
+    if local_path.name != expected:
+        raise LaunchError(
+            f"dataset bundle {local_path} must be a directory named {expected!r}: scp lands it "
+            f"at {remote_dir}/{local_path.name} and the run reads {REMOTE_CACHE_DIR}. Pass "
+            f"'{local_path / expected}' if that is the staging directory."
+        )
+    if not (local_path / "manifest.json").is_file():
+        raise LaunchError(
+            f"{local_path} holds no manifest.json, so it is not a bundle cache. Stage one with "
+            "`python -m infra.runpod.run_phase1_gpu` or "
+            "`model.train_distilbert --build-cache`."
+        )
     host, port = _endpoint(pod)
     opts = _ssh_opts(key_path)
     _run_local(
@@ -1069,6 +1120,39 @@ def run_remote(
     )
 
 
+def wait_for_bootstrap(
+    pod: Pod,
+    *,
+    key_path: Path = DEFAULT_SSH_KEY,
+    timeout_s: float = 1800.0,
+    interval_s: float = 15.0,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> None:
+    """Block until the pod's start command has finished installing wheels.
+
+    SSH answering is not the same as the pod being usable. `build_bootstrap` brings sshd up
+    first and only then runs `pip install`, so the window between "the readiness probe passes"
+    and "scikit-learn exists" is several minutes wide -- and any command sent into that window
+    dies on `ModuleNotFoundError` with the pod already billing. `READY_SENTINEL` is written by
+    the last line of the bootstrap, so its presence is the only proof that the wheels landed.
+    """
+    deadline = monotonic() + timeout_s
+    while True:
+        try:
+            run_remote(
+                pod, f"test -f {shlex.quote(READY_SENTINEL)}", key_path=key_path, timeout=60.0
+            )
+            return
+        except LaunchError:
+            if monotonic() >= deadline:
+                raise ReadinessTimeout(
+                    f"pod {pod.pod_id} never finished its bootstrap within {timeout_s:.0f}s; "
+                    f"the sentinel {READY_SENTINEL} was never written"
+                ) from None
+            sleep(interval_s)
+
+
 def fetch_checkpoint(
     pod: Pod,
     local_dir: Path,
@@ -1076,11 +1160,18 @@ def fetch_checkpoint(
     remote_dir: str = REMOTE_OUTPUT_DIR,
     key_path: Path = DEFAULT_SSH_KEY,
     timeout: float = 1800.0,
+    require_safetensors: bool = True,
 ) -> Path:
     """Pull the trained checkpoint back *before* the pod is destroyed.
 
     This runs inside the lease, never after it: the pod's disk dies with the pod, so a
     checkpoint that has not been copied by teardown time never existed.
+
+    `require_safetensors` is false for the classical run and only for the classical run. That
+    workload writes `.skops`, JSON and `.npz`, never model weights, so demanding a
+    `.safetensors` file would turn a finished cross-validation into `CheckpointError` and
+    report a successful multi-hour run as a failure. The check is exactly as strict as before
+    on every path that produces torch weights.
     """
     host, port = _endpoint(pod)
     Path(local_dir).mkdir(parents=True, exist_ok=True)
@@ -1091,7 +1182,8 @@ def fetch_checkpoint(
         ],
         timeout=timeout,
     )
-    assert_safetensors_checkpoint(Path(local_dir))
+    if require_safetensors:
+        assert_safetensors_checkpoint(Path(local_dir))
     return Path(local_dir)
 
 
@@ -1134,7 +1226,12 @@ def run_finetune(
     output_path: Path,
     spec: FinetuneSpec | None = None,
     gpu_type: str = GPU_CANDIDATES[0],
-    wandb_project: str = "toxic-moderation",
+    # The one project rubric 1.2 and 3.2 are graded on. It disagreed with
+    # `FinetuneSpec.wandb_project`, `run_phase1_gpu`, `train_distilbert` and
+    # `register_pod_artifacts`, all of which say `mlops-toxic-moderation` -- so a run launched
+    # from here landed in a second, empty project, and the dashboard the grader opens would
+    # have been missing it.
+    wandb_project: str = "mlops-toxic-moderation",
     wandb_entity: str | None = None,
     ssh_key: Path = DEFAULT_SSH_KEY,
     max_hours: float = DEFAULT_MAX_HOURS,
@@ -1173,16 +1270,30 @@ def run_finetune(
     ) as pod:
         host, port = _endpoint(pod)
         print(f"pod {pod.pod_id} ready at {host}:{port} (${pod.cost_per_hr:.3f}/hr)")
+        # The readiness probe only proves sshd answers, and the bootstrap installs the wheels
+        # after it starts sshd. Sending a training command into that gap is a
+        # ModuleNotFoundError on a billing GPU.
+        wait_for_bootstrap(pod, key_path=ssh_key)
         archive = Path(output_path).parent / CODE_ARCHIVE_NAME
         deliver_code(pod, make_code_archive(archive), key_path=ssh_key)
         deliver_dataset(pod, dataset_path, key_path=ssh_key)
         run_remote(
             pod,
-            f"cd {REMOTE_WORKDIR} && {spec.classical_command() if spec.classical else spec.train_command()}",
+            f"cd {REMOTE_WORKDIR} && "
+            f"{spec.classical_command() if spec.classical else spec.train_command()}",
             key_path=ssh_key,
             timeout=max_hours * 3600,
         )
-        if export_onnx:
+        if spec.classical:
+            # No torch weights exist to quantise, so there is nothing for ONNX to export; what
+            # there is to rescue is the out-of-fold matrix, which lives in the cache directory.
+            run_remote(
+                pod,
+                f"cd {REMOTE_WORKDIR} && {spec.classical_retrieval_command()}",
+                key_path=ssh_key,
+                timeout=600.0,
+            )
+        elif export_onnx:
             run_remote(
                 pod,
                 f"cd {REMOTE_WORKDIR} && {spec.export_command()}",
@@ -1191,7 +1302,9 @@ def run_finetune(
             )
         # Retrieval happens inside the lease, always. The pod's disk dies with the pod, so a
         # checkpoint still on it at teardown time never existed.
-        fetch_checkpoint(pod, output_path, key_path=ssh_key)
+        fetch_checkpoint(
+            pod, output_path, key_path=ssh_key, require_safetensors=not spec.classical
+        )
     return Path(output_path)
 
 
@@ -1228,7 +1341,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--classical", action="store_true",
         help="run the classical TF-IDF cross-validation instead of the DistilBERT fine-tune",
     )
-    parser.add_argument("--wandb-project", default="toxic-moderation")
+    parser.add_argument("--wandb-project", default="mlops-toxic-moderation")
     parser.add_argument("--wandb-entity", default=None)
     parser.add_argument("--ssh-key", type=Path, default=DEFAULT_SSH_KEY)
     parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)

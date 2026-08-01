@@ -114,36 +114,11 @@ def build_pod_bundle(source: Path | str, dest: Path | str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def wait_for_bootstrap(
-    pod: dep.Pod,
-    *,
-    key_path: Path,
-    timeout_s: float = 1800.0,
-    interval_s: float = 15.0,
-    sleep=time.sleep,
-    monotonic=time.monotonic,
-) -> None:
-    """Block until the pod's start command has finished installing wheels.
-
-    SSH answering is not the same as the pod being usable. `dockerStartCmd` brings sshd up
-    first and only then runs `pip install`, so the window between "readiness probe passes" and
-    "transformers exists" is several minutes wide -- and a training command sent into that
-    window dies on `ModuleNotFoundError` with the pod already billing.
-    """
-    deadline = monotonic() + timeout_s
-    while True:
-        try:
-            dep.run_remote(
-                pod, f"test -f {shlex.quote(dep.READY_SENTINEL)}", key_path=key_path, timeout=60.0
-            )
-            return
-        except dep.LaunchError:
-            if monotonic() >= deadline:
-                raise dep.ReadinessTimeout(
-                    f"pod {pod.pod_id} never finished its bootstrap within {timeout_s:.0f}s; "
-                    f"the sentinel {dep.READY_SENTINEL} was never written"
-                ) from None
-            sleep(interval_s)
+# One implementation, in the module that owns the bootstrap that writes the sentinel. It lives
+# there because `deploy_runpod.run_finetune` needs it too -- that driver went straight from
+# "sshd answers" to `deliver_code`, which is the gap this closes -- and a second copy here
+# would be a second thing to keep in step with `build_bootstrap`.
+wait_for_bootstrap = dep.wait_for_bootstrap
 
 
 WANDB_GRAPHQL = "https://api.wandb.ai/graphql"

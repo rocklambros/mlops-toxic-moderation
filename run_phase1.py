@@ -72,8 +72,41 @@ def rss_gb() -> float:
 
 
 def load_bundle():
-    with (CACHE / "bundle.pkl").open("rb") as fh:
-        return pickle.load(fh)
+    """Load the prepared corpus, in whichever of the two on-disk shapes `PHASE1_CACHE` holds.
+
+    The directory cache -- `train.csv.gz` + `folds.npz` + `manifest.json`, written by
+    `model.train_distilbert.write_bundle_cache` -- is the shape that actually exists and the
+    only one that travels: `run_phase1_gpu.build_pod_bundle` strips the held-out rows out of
+    the copy bound for a pod, and `deploy_runpod.deliver_dataset` scps that directory to
+    `/workspace/data/bundle`. Nothing in this repo has ever written a `bundle.pkl`, so reading
+    one unconditionally made the classical CV impossible to run on a pod: the first statement
+    after `main()` raised `FileNotFoundError` on a GPU that was already billing. The pickle
+    branch survives only for a cache built by hand before the directory format existed.
+
+    `with_test=False` is not a default being accepted, it is the leakage firewall: this script
+    never reads the held-out rows, and the copy that ships to a pod does not contain them.
+    """
+    legacy = CACHE / "bundle.pkl"
+    if legacy.exists():
+        with legacy.open("rb") as fh:
+            return pickle.load(fh)  # noqa: S301 - a file this box wrote, not an input
+
+    from model.train_distilbert import load_bundle_cache  # noqa: PLC0415
+
+    return load_bundle_cache(CACHE, with_test=False)
+
+
+def n_held_out(bundle) -> int | str:
+    """How many rows are being withheld, for the log line, without reaching for them.
+
+    `CachedBundle.test_df` raises by design when the cache was written without the held-out
+    rows -- which is exactly the cache that ships to a pod -- so the banner that reported the
+    count was itself the second thing that would have killed the classical run, one statement
+    after the loader.
+    """
+    if not hasattr(bundle, "held_out"):  # a legacy pickled DatasetBundle carries them
+        return len(bundle.test_df)
+    return "withheld from this copy" if bundle.held_out is None else len(bundle.held_out)
 
 
 def jsonable(obj):
@@ -81,14 +114,14 @@ def jsonable(obj):
         return jsonable(asdict(obj))
     if isinstance(obj, dict):
         return {str(k): jsonable(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
+    if isinstance(obj, list | tuple):
         return [jsonable(v) for v in obj]
-    if isinstance(obj, (np.integer,)):
+    if isinstance(obj, np.integer):
         return int(obj)
-    if isinstance(obj, (np.floating, float)):
+    if isinstance(obj, np.floating | float):
         value = float(obj)
         return value if np.isfinite(value) else None
-    if isinstance(obj, (np.bool_, bool)):
+    if isinstance(obj, np.bool_ | bool):
         return bool(obj)
     if isinstance(obj, np.ndarray):
         return jsonable(obj.tolist())
@@ -106,6 +139,87 @@ def dump(name: str, payload) -> Path:
 def per_label(values) -> dict[str, float]:
     """Positional -> per-label through THE authoritative adapter. No local zip(LABELS, ...)."""
     return probs_to_dict(np.asarray(list(values), dtype=float))
+
+
+# --------------------------------------------------------------------------------------
+# experiment tracking
+# --------------------------------------------------------------------------------------
+
+_RUN = None
+
+
+def start_run(bundle):
+    """Open the W&B run every stage logs into, or refuse before the first fit.
+
+    Rubric 1.2 is graded on the run page, so a multi-hour classical CV that logs nothing is a
+    multi-hour bill for an ungraded artifact. That is exactly what happened on 2026-07-31:
+    every pod was created with `WANDB_API_KEY` in its payload, RunPod delivered it to the
+    container's PID 1, no `sshd` session inherited it, and zero runs were recorded.
+    `infra/runpod/podenv.py` is what restores it; this refuses at second one rather than
+    discovering at the end that it was never there.
+
+    `PHASE1_NO_WANDB=1` opts out, for the cheap local stages that are not a tracked run.
+    """
+    if os.environ.get("PHASE1_NO_WANDB"):
+        log("PHASE1_NO_WANDB is set: this invocation is NOT tracked")
+        return None
+    if not os.environ.get("WANDB_API_KEY"):
+        # Env first, `pass` second -- the same helper the fine-tune uses, so the two cannot
+        # drift. On a pod `pass` does not exist and the env var is the only path, which is
+        # why the command that gets here goes through `podenv --require WANDB_API_KEY`.
+        from model.train_distilbert import load_secret  # noqa: PLC0415
+
+        os.environ["WANDB_API_KEY"] = load_secret("wandb/api-key", "WANDB_API_KEY")
+    import wandb  # noqa: PLC0415
+
+    # Scalars and version hashes only. The project is public by owner decision, which makes a
+    # run page the last place a user comment could escape into a graded artifact.
+    run = wandb.init(
+        project=os.environ.get("WANDB_PROJECT") or "mlops-toxic-moderation",
+        entity=os.environ.get("WANDB_ENTITY") or None,
+        name=os.environ.get("WANDB_RUN_NAME") or None,
+        job_type="train-classical",
+        config={
+            "model_name": "classical-tfidf-ovr-calibrated-logreg",
+            "solver": SOLVER,
+            "max_iter": MAX_ITER,
+            "calibration_folds": CALIBRATION_FOLDS,
+            "word_max_features": WORD_MAX_FEATURES,
+            "char_max_features": CHAR_MAX_FEATURES,
+            "n_bootstrap": N_BOOT,
+            "n_train_rows": int(len(bundle.train_df)),
+            "n_folds": len(bundle.fold_indices),
+            "raw_sha256": bundle.raw_sha256,
+            "split_version": bundle.split_version,
+            "env_version": bundle.env_version,
+            "data_version": bundle.data_version,
+            **run_metadata(SEED, bundle.raw_sha256, bundle.split_version, bundle.env_version),
+        },
+    )
+    log(f"W&B run: {getattr(run, 'url', None) or getattr(run, 'id', '?')}")
+    return run
+
+
+def track(prefix: str, values: dict) -> None:
+    """Log the finite scalars in `values` under `prefix`. A no-op when nothing is tracking.
+
+    Deliberately drops non-numbers rather than stringifying them: everything in this project's
+    metric dictionaries that is not a number is either a threshold report or a text field, and
+    a text field on a public run page is a published text field.
+    """
+    if _RUN is None:
+        return
+    flat = {}
+    for key, value in values.items():
+        if isinstance(value, bool) or not isinstance(value, int | float | np.number):
+            continue
+        number = float(value)
+        if np.isfinite(number):
+            flat[f"{prefix}/{key}"] = number
+    if not flat:
+        return
+    _RUN.log(flat)
+    _RUN.summary.update(flat)
 
 
 # --------------------------------------------------------------------------------------
@@ -163,6 +277,8 @@ def stage_baseline(bundle) -> None:
 
     np.savez_compressed(CACHE / "baseline_oof.npz", y_true=oof.y_true, y_prob=oof.y_prob,
                         row_fold=oof.row_fold)
+    track("baseline", metrics)
+    track("baseline_prevalence", prevalence)
     dump("baseline_metrics.json", {
         "run": "baseline-prior-only",
         "model": "OneVsRest(DummyClassifier(strategy='prior')) — most-frequent / prior-only",
@@ -306,6 +422,14 @@ def stage_cv(bundle) -> None:
     OofPredictions(y_true=y, y_prob=y_prob, row_fold=row_fold,
                    split_version=bundle.split_version)
     np.savez_compressed(CACHE / "oof.npz", y_true=y, y_prob=y_prob, row_fold=row_fold)
+    track("cv", {
+        "total_fit_minutes": sum(r["fit_seconds"] for r in records) / 60,
+        "this_invocation_minutes": elapsed / 60,
+        "worst_max_n_iter": max(r["max_n_iter"] for r in records),
+        "word_vocab": records[-1]["word_vocab"],
+        "char_vocab": records[-1]["char_vocab"],
+        "peak_rss_gb": max(r["peak_rss_gb"] for r in records),
+    })
     dump("cv_fold_timings.json", {
         "split_version": bundle.split_version,
         "this_invocation_minutes": elapsed / 60,
@@ -371,6 +495,13 @@ def stage_thresholds(bundle) -> None:
 
     y_flag = (oof.y_prob >= np.array([thresholds[label] for label in LABELS])).astype(int)
     oof_flag_rates = per_label(y_flag.mean(axis=0))
+
+    # Rubric 1.2's four requirements are already in the run config (code version, data
+    # versions, hyperparameters); this is the fourth, the performance metrics, accuracy
+    # included and never promoted on.
+    track("oof", metrics)
+    track("threshold", thresholds)
+    track("oof_flag_rate", oof_flag_rates)
 
     dump("cv_metrics.json", {
         "run": "classical-tfidf-ovr-calibrated-logreg",
@@ -660,6 +791,8 @@ def _refuse_local_cv_if_stopped(stages):
 
 
 def main() -> None:
+    global _RUN
+
     parser = argparse.ArgumentParser()
     parser.add_argument("stages", nargs="+", choices=[*STAGES, "all"])
     args = parser.parse_args()
@@ -668,15 +801,22 @@ def main() -> None:
     assert_hash_seed_pinned()
     _refuse_local_cv_if_stopped(sys.argv[1:])
     bundle = load_bundle()
-    log(f"bundle: train={len(bundle.train_df)} test={len(bundle.test_df)} "
+    log(f"bundle: train={len(bundle.train_df)} test={n_held_out(bundle)} "
         f"folds={len(bundle.fold_indices)} split_version={bundle.split_version}")
     log(json.dumps(run_metadata(SEED, bundle.raw_sha256, bundle.split_version,
                                 bundle.env_version)))
-    for name in names:
-        log(f"===== stage: {name} =====")
-        t0 = time.perf_counter()
-        STAGES[name](bundle)
-        log(f"===== stage {name} done in {(time.perf_counter() - t0) / 60:.1f} min =====")
+
+    # Before the first fit, so a tracking problem costs a second rather than a GPU hour.
+    _RUN = start_run(bundle)
+    try:
+        for name in names:
+            log(f"===== stage: {name} =====")
+            t0 = time.perf_counter()
+            STAGES[name](bundle)
+            log(f"===== stage {name} done in {(time.perf_counter() - t0) / 60:.1f} min =====")
+    finally:
+        if _RUN is not None:
+            _RUN.finish()
 
 
 if __name__ == "__main__":
