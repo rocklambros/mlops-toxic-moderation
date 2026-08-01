@@ -13,7 +13,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import sessionmaker
 
 from backend.config import load_settings
-from backend.db import Base, init_schema
+from backend.db import Base, init_db
+from backend.schema_phase3 import apply_phase3_schema
 from model.labels import LABELS
 from tests.fixtures.make_model import build_demo_artifact
 
@@ -38,9 +39,29 @@ def engine(postgres_url):
     from sqlalchemy import create_engine
 
     engine = create_engine(postgres_url, future=True)
-    init_schema(engine)
+    init_db(engine)
+    apply_phase3_schema(engine)
     yield engine
     engine.dispose()
+
+
+@pytest.fixture()
+def conn(engine):
+    """A raw connection for the SQL-level Phase 3 suites.
+
+    Phase 3's admission control and re-scorer drain are written in SQL against a connection
+    rather than through the ORM, because their correctness is in `FOR UPDATE SKIP LOCKED`
+    and in partial-index conflicts that an ORM round trip hides. Truncating on entry rather
+    than on exit means a test that commits (admission control does) cannot leak into the
+    next one even if it fails mid-way.
+    """
+    from sqlalchemy import text
+
+    with engine.connect() as connection:
+        connection.execute(text("TRUNCATE TABLE feedback, review_queue, predictions CASCADE"))
+        connection.commit()
+        yield connection
+        connection.rollback()
 
 
 @pytest.fixture()
