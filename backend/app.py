@@ -33,6 +33,7 @@ from backend.policy import decide, load_thresholds
 from backend.preprocess import prepare_input
 from backend.ratelimit import RateLimiter
 from backend.review_api import router as review_router
+from backend.schema_phase3 import apply_phase3_schema
 from backend.schemas import PredictRequest
 from backend.spool import Spool, SpoolFull
 from model.contract import LabelScore, PredictionResponse, enforce_hierarchy, probs_to_dict
@@ -54,6 +55,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.engine = make_engine(settings)
         app.state.session_factory = sessionmaker(bind=app.state.engine, expire_on_commit=False)
         init_db(app.state.engine)
+        # `init_db` creates the three tables from the ORM. It does not create the columns
+        # and partial indexes that live only in the Phase 3 migration -- `is_seed`, the
+        # composite index the per-source quota counts against, and the one-user-verdict
+        # index -- so without this line they exist only where somebody ran the migration by
+        # hand, and `make seed-demo` fails on its first statement against the deployed
+        # database. Both are idempotent, so re-running them on every boot is free.
+        apply_phase3_schema(app.state.engine)
         # Startup fails closed: a digest or allowlist violation must stop the container from
         # ever accepting traffic, not surface as a 500 on the first request.
         app.state.model = load_from_settings(settings)

@@ -84,3 +84,25 @@ serve:
 
 purge:
 	$(BIN)/python -m backend.retention
+
+.PHONY: heldout seed-demo seed-demo-purge
+
+# The dashboard's data source (premortem C5). `heldout` exports the LOCKED test split, so
+# the replayed comments are ones the model never trained on -- replaying training rows would
+# make live accuracy a measurement of memorisation. `seed-demo` then replays them through a
+# running backend and exits non-zero if the resulting dataset would leave a graded panel
+# degenerate.
+RAW_CSV ?= data/raw/jigsaw-toxic-comment-train.csv
+SEED_CSV ?= data/heldout.csv
+SEED_N ?= 2000
+SEED_DAYS ?= 14
+
+heldout:
+	PYTHONHASHSEED=0 $(BIN)/python -m scripts.export_heldout --csv $(RAW_CSV) --out $(SEED_CSV)
+
+seed-demo:
+	PYTHONHASHSEED=0 $(BIN)/python -m scripts.seed_demo --csv $(SEED_CSV) --n $(SEED_N) \
+	  --days $(SEED_DAYS)
+
+seed-demo-purge:
+	PYTHONHASHSEED=0 $(BIN)/python -m scripts.seed_demo --csv $(SEED_CSV) --purge --n 0

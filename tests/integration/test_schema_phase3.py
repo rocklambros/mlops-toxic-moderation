@@ -175,3 +175,63 @@ def test_two_reviewer_feedback_rows_for_one_request_are_still_allowed(conn):
     assert conn.execute(
         text("SELECT count(*) FROM feedback WHERE request_id = 'r4'")
     ).scalar_one() == 2
+
+
+def _recreate_database(url: str, name: str):
+    """A database the migration has never touched, so the assertions below are about the
+    application's startup path rather than about the test fixture that already ran it."""
+    from sqlalchemy import create_engine as _create_engine
+    from sqlalchemy.engine import make_url
+
+    base = make_url(url)
+    admin = _create_engine(base.set(database="postgres"), isolation_level="AUTOCOMMIT")
+    with admin.connect() as connection:
+        connection.exec_driver_sql(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+        connection.exec_driver_sql(f'CREATE DATABASE "{name}"')
+    admin.dispose()
+    return base.set(database=name)
+
+
+def _indexes(conn, table: str) -> set[str]:
+    return set(
+        conn.execute(
+            text("SELECT indexname FROM pg_indexes WHERE tablename = :t"), {"t": table}
+        ).scalars()
+    )
+
+
+def test_the_application_startup_path_applies_the_phase3_migration(app_settings):
+    """The deployed backend runs `init_db` at startup and nothing else. `is_seed`, the
+    per-source quota index and the one-user-verdict index are declared only in
+    `backend/schema_phase3.py`, so if startup does not call it, every one of them exists
+    only where someone ran the migration by hand -- and `make seed-demo`, whose very first
+    statement sets `is_seed`, fails on the deployed database.
+    """
+    import dataclasses
+
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine
+
+    from backend.app import create_app
+    from backend.db import init_db
+
+    fresh = _recreate_database(app_settings.database_url, "toxic_startup_check")
+    engine = create_engine(fresh, future=True)
+    init_db(engine)
+    with engine.connect() as probe:
+        assert "is_seed" not in _columns(probe, "predictions"), (
+            "init_db alone already creates is_seed, so this test proves nothing"
+        )
+
+    # `str(URL)` masks the password as `***`; the app would then fail to authenticate and
+    # the assertions below would be about a database nobody connected to.
+    dsn = fresh.render_as_string(hide_password=False)
+    with TestClient(create_app(dataclasses.replace(app_settings, database_url=dsn))):
+        pass
+
+    with engine.connect() as probe:
+        assert "is_seed" in _columns(probe, "predictions")
+        assert "submitter_fp" in _columns(probe, "predictions")
+        assert "predictions_fp_ts_idx" in _indexes(probe, "predictions")
+        assert "feedback_one_user_row" in _indexes(probe, "feedback")
+    engine.dispose()
