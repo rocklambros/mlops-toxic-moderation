@@ -30,3 +30,30 @@ markers = [
     "perf: measures latency against a real database, applied automatically to tests/perf (deselect with -m 'not perf')",
     "awsapply: needs a real AWS session; never runs in pull-request CI (premortem H36)",
 ]
+
+# Rubric 4.1's coverage floor, on the code that decides outcomes. Branch coverage, not line:
+# a policy `if` whose false arm is never taken is exactly the shape of an untested decision,
+# and line coverage calls it covered.
+#
+# `frontend` and `rescorer` are absent from `source` on purpose. The Streamlit entry points
+# are render code whose only meaningful test is the Phase 3 end-to-end traversal, and counting
+# them pushes the project toward coverage theatre against a UI. `rescorer` sits behind the
+# day-8 cut line, and a `source` entry for a package that was cut fails the run for the wrong
+# reason.
+[tool.coverage.run]
+branch = true
+source = ["model", "backend", "monitoring"]
+omit = [
+    "frontend/ui.py",
+    "monitoring/dashboard.py",
+    "*/__main__.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

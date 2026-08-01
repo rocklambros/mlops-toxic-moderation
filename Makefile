@@ -83,7 +83,7 @@ data:
 fetch-data:
 	./scripts/fetch_jigsaw.sh
 
-.PHONY: serve-deps test-integration serve purge loadtest
+.PHONY: serve-deps test-integration test-cov serve purge loadtest
 
 # Same supply-chain posture as `lock` and `venv`: pip-tools resolves in a throwaway venv so
 # the resolver never shares an environment with the project, and every install is
@@ -98,6 +98,16 @@ serve-deps: check-py
 
 test-integration:
 	PYTHONHASHSEED=0 $(BIN)/pytest -m integration
+
+# Rubric 4.1's coverage floor. Coverage is APPENDED across the two halves so the number
+# describes the whole suite: measuring only the unit half reports the FastAPI endpoints as
+# zero, and measuring only the integration half hides every pure function in `model`. The
+# floor is therefore checked on the appended total, in the second run, and nowhere else --
+# two floors in two files is how a floor gets lowered without anyone lowering it.
+test-cov:
+	PYTHONHASHSEED=0 $(BIN)/pytest -m "not integration" --cov --cov-report=
+	PYTHONHASHSEED=0 $(BIN)/pytest -m integration --cov --cov-append \
+	  --cov-report=term-missing:skip-covered --cov-fail-under=80
 
 .PHONY: ui-lock
 
