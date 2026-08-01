@@ -6,16 +6,30 @@ assertions that follow then measure an empty table rather than the query under t
 """
 
 import datetime as dt
+from pathlib import Path
 
 import pytest
 from sqlalchemy import text
 
 from model.labels import LABELS
-from monitoring.queries import latency_over_time
+from monitoring.baseline import Baseline, load_thresholds
+from monitoring.queries import DriftRow, drift_report, flag_rate_series, latency_over_time
 
 pytestmark = pytest.mark.integration
 
 NOW = dt.datetime(2026, 8, 14, 12, 0, tzinfo=dt.UTC)
+
+THRESHOLDS = load_thresholds(Path("tests/fixtures/thresholds.json"))
+BASELINE = Baseline(
+    schema_version=1,
+    data_version="d",
+    model_version="toxic-clf:v3",
+    n=1000,
+    flag_rates={
+        "toxic": 0.10, "severe_toxic": 0.01, "obscene": 0.05,
+        "threat": 0.003, "insult": 0.05, "identity_hate": 0.009,
+    },
+)
 
 
 def insert_prediction(conn, request_id, ts, probs=None, latency_ms=20, is_seed=False):
@@ -105,3 +119,115 @@ def test_latency_respects_the_window(conn):
     conn.commit()
     buckets = latency_over_time(conn, since=NOW - dt.timedelta(days=14))
     assert len(buckets) == 1
+
+
+def _toxic_probs(value: float) -> dict[str, float]:
+    probs = {label: 0.01 for label in LABELS}
+    probs["toxic"] = value
+    return probs
+
+
+def test_drift_report_returns_one_row_per_label_with_a_reference(conn):
+    for i in range(100):
+        # 30 of 100 above the 0.45 toxic threshold -> production rate 0.30 vs baseline 0.10
+        insert_prediction(conn, f"d{i}", NOW - dt.timedelta(hours=i),
+                          probs=_toxic_probs(0.9 if i < 30 else 0.1))
+    conn.commit()
+
+    rows = drift_report(conn, since=NOW - dt.timedelta(days=14),
+                        thresholds=THRESHOLDS, baseline=BASELINE)
+    assert [row.label for row in rows] == list(LABELS)
+    toxic = next(row for row in rows if row.label == "toxic")
+    assert isinstance(toxic, DriftRow)
+    assert toxic.baseline_rate == pytest.approx(0.10)
+    assert toxic.production_rate == pytest.approx(0.30)
+    assert toxic.psi == pytest.approx(0.26999, abs=1e-4)
+    assert toxic.js == pytest.approx(0.04678, abs=1e-4)
+    assert toxic.alert is True
+
+
+def test_a_stable_label_does_not_alert(conn):
+    for i in range(100):
+        insert_prediction(conn, f"s{i}", NOW - dt.timedelta(hours=i),
+                          probs=_toxic_probs(0.9 if i < 10 else 0.1))
+    conn.commit()
+    rows = drift_report(conn, since=NOW - dt.timedelta(days=14),
+                        thresholds=THRESHOLDS, baseline=BASELINE)
+    toxic = next(row for row in rows if row.label == "toxic")
+    assert toxic.production_rate == pytest.approx(0.10)
+    assert toxic.psi == pytest.approx(0.0, abs=1e-9)
+    assert toxic.alert is False
+
+
+def test_each_label_is_flagged_against_its_own_threshold(conn):
+    """One probability, six different answers. A single global threshold -- or the wrong
+    label's -- reproduces none of this, and would silently redefine the decision rule the
+    Phase 1 baseline was computed under, which is the only thing that makes PSI comparable."""
+    for i in range(10):
+        insert_prediction(conn, f"pl{i}", NOW - dt.timedelta(hours=i),
+                          probs=dict.fromkeys(LABELS, 0.28))
+    conn.commit()
+    rows = {row.label: row for row in drift_report(
+        conn, since=NOW - dt.timedelta(days=14), thresholds=THRESHOLDS, baseline=BASELINE)}
+    # thresholds.json: toxic .45, severe_toxic .30, obscene .50, threat .18, insult .47,
+    # identity_hate .25. Only threat and identity_hate sit below 0.28.
+    assert rows["threat"].production_rate == pytest.approx(1.0)
+    assert rows["identity_hate"].production_rate == pytest.approx(1.0)
+    for label in ("toxic", "severe_toxic", "obscene", "insult"):
+        assert rows[label].production_rate == pytest.approx(0.0), label
+
+
+def test_a_probability_exactly_on_the_threshold_is_flagged(conn):
+    """`>=`, not `>`. Phase 1's baseline_flag_rates.json was computed with the same
+    comparison; flipping it here puts the reference and the production series on two
+    different decision rules and the PSI stops meaning anything."""
+    insert_prediction(conn, "edge", NOW - dt.timedelta(hours=1),
+                      probs=_toxic_probs(THRESHOLDS["toxic"]))
+    conn.commit()
+    rows = {row.label: row for row in drift_report(
+        conn, since=NOW - dt.timedelta(days=14), thresholds=THRESHOLDS, baseline=BASELINE)}
+    assert rows["toxic"].production_rate == pytest.approx(1.0)
+
+
+def test_the_alert_threshold_is_the_one_the_caller_states(conn):
+    """The caption names a number. If the flag were computed against a constant, the number
+    on the screenshot and the rule behind it would be two different things."""
+    for i in range(100):
+        insert_prediction(conn, f"al{i}", NOW - dt.timedelta(hours=i),
+                          probs=_toxic_probs(0.9 if i < 30 else 0.1))
+    conn.commit()
+    strict = drift_report(conn, since=NOW - dt.timedelta(days=14), thresholds=THRESHOLDS,
+                          baseline=BASELINE, alert_psi=0.2)
+    lax = drift_report(conn, since=NOW - dt.timedelta(days=14), thresholds=THRESHOLDS,
+                       baseline=BASELINE, alert_psi=1.0)
+    assert next(row for row in strict if row.label == "toxic").alert is True
+    assert next(row for row in lax if row.label == "toxic").alert is False
+
+
+def test_drift_on_an_empty_window_reports_zero_rates_without_dividing_by_zero(conn):
+    rows = drift_report(conn, since=NOW - dt.timedelta(days=14),
+                        thresholds=THRESHOLDS, baseline=BASELINE)
+    assert len(rows) == len(LABELS)
+    assert all(row.production_rate == 0.0 for row in rows)
+    assert all(row.psi >= 0.0 for row in rows)
+
+
+def test_flag_rate_series_has_one_row_per_bucket_and_one_column_per_label(conn):
+    for day in range(7):
+        for i in range(5):
+            insert_prediction(conn, f"t{day}_{i}", NOW - dt.timedelta(days=day),
+                              probs=_toxic_probs(0.9 if i < 2 else 0.1))
+    conn.commit()
+    frame = flag_rate_series(conn, since=NOW - dt.timedelta(days=14), thresholds=THRESHOLDS)
+    assert len(frame) == 7
+    assert list(frame.columns) == ["bucket", *LABELS]
+    assert frame["toxic"].iloc[0] == pytest.approx(0.4)
+    assert frame["threat"].iloc[0] == pytest.approx(0.0)
+
+
+def test_flag_rate_series_on_an_empty_window_still_has_every_column(conn):
+    """A degenerate frame with no columns is what makes the dashboard's chart call raise
+    instead of drawing nothing."""
+    frame = flag_rate_series(conn, since=NOW - dt.timedelta(days=14), thresholds=THRESHOLDS)
+    assert len(frame) == 0
+    assert list(frame.columns) == ["bucket", *LABELS]
