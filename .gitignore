@@ -35,6 +35,10 @@ claudedocs/mlops_final_project_requrements_aws.md
 # from ten commits. Tests passed locally because the files were on disk; a fresh clone
 # had no data pipeline at all.
 /data/
+# ...and the convenience symlink some worktrees carry. It points at an ABSOLUTE path on
+# one machine, so committing it gives every fresh clone and every CI runner a dangling
+# link, and leaks the developer's directory layout.
+/data
 *.csv
 # ...but the synthetic test fixture is a committed source artifact, not data.
 !tests/fixtures/*.csv
@@ -87,3 +91,27 @@ htmlcov/
 
 # Raw dataset, fetched by scripts/fetch_jigsaw.sh, never committed
 /data/raw/
+
+# Terraform. The lock file IS committed (it pins provider hashes); state and local
+# working dirs are not. tfvars may carry the operator CIDR and alert email, so those
+# stay out.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+*.tfvars
+!*.tfvars.example
+# ...but the pinned AMI IS source. `variables.tf` says ami_id is "supplied by the
+# committed infra/terraform/ami.auto.tfvars", and the whole point of pinning it rather
+# than resolving the latest AL2023 at plan time is that the value is reviewed. It is
+# already tracked, so it survives a fresh clone -- but only because ignore rules do not
+# apply to tracked files. Without this exception a rotated AMI silently fails to stage,
+# which is the same shape as the unanchored `data/` that hid ten modules for ten commits.
+!infra/terraform/ami.auto.tfvars
+
+# RunPod launch registry: runtime state, not source. It records live pod ids so a crash
+# between "pod created" and "pod ready" still leaves something terminatable. Committing it
+# would ship one machine's live pods to every other clone.
+infra/runpod/runpod_pods.json
