@@ -1,0 +1,25 @@
+# Patterns here are anchored at the build-context root, unlike .gitignore, so the nested
+# forms carry an explicit **/ prefix.
+.git
+.github
+.venv
+.venv-lock
+tests
+docs
+infra
+claudedocs
+scripts
+artifacts
+data
+wandb
+*.spool
+**/*.spool
+*.pyc
+**/*.pyc
+__pycache__
+**/__pycache__
+.pytest_cache
+.ruff_cache
+.mypy_cache
+htmlcov
+.coverage
