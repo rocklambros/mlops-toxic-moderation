@@ -1,0 +1,214 @@
+name: ci
+
+# Rubric 4.2: "a GitHub Actions workflow that triggers on pull requests to main".
+# `pull_request` (not `pull_request_target`) gives a fork's PR a read-only GITHUB_TOKEN and no
+# access to repository secrets, which is what keeps a fork out of the deploy path.
+on:
+  pull_request:
+    branches: [main]
+
+# The repository default token permission is write. Denying everything here and re-granting
+# per job is the only configuration where adding a job cannot silently widen the token
+# (premortem H35). No job below grants `id-token`: minting the OIDC token the deploy role
+# trusts is the deploy path, not the pull-request path (premortem H4, H36).
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Every job runs on aarch64, and the label is load-bearing rather than cosmetic.
+# `requirements/dev.lock` and `requirements/security.txt` were compiled on aarch64 with
+# `--generate-hashes` and `--only-binary=:all:`, so they carry the hashes of manylinux
+# *aarch64* wheels -- including semgrep's per-architecture wheel. On an x86_64 runner pip
+# selects a different file, finds no matching hash, and refuses the whole lock. The serving
+# fleet is t4g/arm64 Graviton and every image base is pinned to a multi-arch index carrying
+# linux/arm64/v8, so the runner also matches what is shipped.
+env:
+  PYTHONHASHSEED: "0"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        with:
+          python-version: "3.11"
+      - name: Install the hashed development lock
+        run: >-
+          python -m pip install --require-hashes --only-binary=:all:
+          -r requirements/dev.lock
+      - name: ruff
+        run: ruff check .
+
+  test:
+    name: test
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    services:
+      # A real Postgres, never SQLite: the schema uses JSONB and ON CONFLICT, and delivery
+      # spec 3.3 makes a real dependency the phase gate. `postgres` is a superuser here
+      # because tests/integration/test_schema_phase3.py recreates a database to exercise the
+      # application's own startup migration, which needs CREATE DATABASE.
+      postgres:
+        image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: toxic_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # The conftest fake-green guard refuses an integration run inside CI without this, so
+      # the suite cannot silently fall back to starting a container of its own.
+      TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5433/toxic_test
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        with:
+          python-version: "3.11"
+      - uses: actions/cache@6849a6489940f00c2f30c0fb92c6274307ccb58a  # v4.1.2
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('requirements/*.txt', 'requirements/*.lock') }}
+      - name: Install the hashed development lock
+        run: >-
+          python -m pip install --require-hashes --only-binary=:all:
+          -r requirements/dev.lock
+      - name: Unit tests
+        run: pytest -m "not integration" --cov --cov-report=
+      # Rubric 4.1's floor, on the APPENDED total: measuring only the unit half reports the
+      # FastAPI endpoints as zero, and measuring only the integration half hides every pure
+      # function in `model`.
+      - name: Integration tests against a real Postgres
+        run: pytest -m integration --cov --cov-append --cov-report=term-missing:skip-covered --cov-fail-under=80
+
+  secrets-scan:
+    name: secrets-scan
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          # gitleaks scans git history, so a shallow clone scans one commit and reports clean.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install gitleaks from a checksum-verified release
+        run: ./scripts/install_gitleaks.sh
+      - name: gitleaks
+        run: ./bin/gitleaks detect --source . --redact --no-banner --exit-code 1
+
+  sast:
+    name: sast
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        with:
+          python-version: "3.11"
+      - name: Install the hashed security lock
+        run: >-
+          python -m pip install --require-hashes --only-binary=:all:
+          -r requirements/security.txt
+      - name: semgrep
+        env:
+          SEMGREP_SEND_METRICS: "off"
+        run: semgrep scan --config p/python --config p/secrets --error --metrics=off --disable-version-check .
+
+  deps-audit:
+    name: deps-audit
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        with:
+          python-version: "3.11"
+      - name: Install the hashed security lock
+        run: >-
+          python -m pip install --require-hashes --only-binary=:all:
+          -r requirements/security.txt
+      - name: Audit every shipped lock
+        run: ./scripts/run_pip_audit.sh
+
+  terraform:
+    name: terraform
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Read the pinned Terraform version
+        id: tfver
+        run: echo "version=$(cat .terraform-version)" >> "$GITHUB_OUTPUT"
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd  # v3.1.2
+        with:
+          terraform_version: ${{ steps.tfver.outputs.version }}
+          terraform_wrapper: false
+      # `fmt -check -recursive` over an empty tree exits 0, and `validate` is never reached
+      # if `init` has nothing to initialise. Without this step the whole job is a green check
+      # that examined no Terraform at all.
+      - name: Refuse to pass silently when there is nothing to validate
+        run: |
+          test -d infra/terraform || { echo "::error::infra/terraform is missing"; exit 1; }
+          test -n "$(find infra/terraform -name '*.tf' -print -quit)" \
+            || { echo "::error::infra/terraform contains no .tf files"; exit 1; }
+      - name: terraform fmt
+        run: terraform fmt -check -recursive infra/
+      # `-backend=false` is what keeps this off the remote state bucket and therefore off
+      # AWS credentials entirely. `validate`, never `plan`: `plan` executes provider
+      # binaries, `data "external"` programs, and module source fetches against .tf files a
+      # pull-request author controls, and the rubric does not ask for it (premortem H36).
+      - name: terraform validate
+        working-directory: infra/terraform
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+  # D1. Branch protection pins check CONTEXTS by name. Requiring the six job names above
+  # means every future job silently stops being required, and a renamed job leaves a required
+  # context that never reports, deadlocking every merge. One aggregate context solves both.
+  ci-gate:
+    name: ci-gate
+    needs: [lint, test, secrets-scan, sast, deps-audit, terraform]
+    if: always()
+    runs-on: ubuntu-24.04-arm
+    permissions: {}
+    steps:
+      - name: Fail unless every required job succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "upstream results: ${RESULTS}"
+          for result in ${RESULTS}; do
+            if [ "${result}" != "success" ]; then
+              echo "::error::a required job reported '${result}'"
+              exit 1
+            fi
+          done
+          echo "all required jobs succeeded"
