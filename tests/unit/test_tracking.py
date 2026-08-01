@@ -405,18 +405,46 @@ def test_a_matching_expected_digest_is_accepted_in_either_form(tmp_path):
 
 
 def test_the_artifact_is_linked_to_the_registry_at_a_promoted_stage(tmp_path):
-    """Rubric 1.3 is graded on the Registry page showing a promoted stage, not on the run."""
+    """Rubric 1.3 is graded on the Registry page showing a promoted stage, not on the run.
+
+    The link target carries no entity prefix. W&B migrated the per-entity `model-registry`
+    project away and the backend answers `<team>/model-registry/<collection>` with a 400; the
+    migrated registry is org-scoped and resolves the organization from the source artifact.
+    """
     run, path = FakeRun(), _skops_file(tmp_path)
     promoted = log_model_artifact(
         run, path, config=_config(), metrics=_metrics(), artifact_factory=FakeArtifact
     )
     artifact, target_path, aliases = run.links[0]
     assert artifact is run.logged_artifacts[0][0]
-    assert target_path == f"rocklambros/{REGISTRY_PROJECT}/{MODEL_COLLECTION}"
+    assert target_path == f"{REGISTRY_PROJECT}/{MODEL_COLLECTION}"
+    assert "rocklambros" not in target_path
     assert aliases == [PRODUCTION_ALIAS]
     assert promoted.registry_target == target_path
     assert promoted.url == public_registry_url("rocklambros")
     assert promoted.url.endswith(f"/{REGISTRY_PROJECT}/artifacts/model/{MODEL_COLLECTION}")
+
+
+def test_the_registry_entity_overrides_the_runs_team_for_the_public_url(tmp_path):
+    """The registry page lives under the ORGANIZATION, which is not the team the run is in.
+
+    On this account the run's entity is `rockcyber` and the registry is `rockcyber-org`.
+    Recording the team's name yields a URL that 404s while still looking like evidence.
+    """
+    run, path = FakeRun(), _skops_file(tmp_path)
+    promoted = log_model_artifact(
+        run, path, config=_config(), metrics=_metrics(),
+        registry_entity="rocklambros-org", artifact_factory=FakeArtifact,
+    )
+    assert promoted.url == public_registry_url("rocklambros-org")
+
+
+def test_the_legacy_registry_project_is_named_but_not_used():
+    """Kept as a constant so the migration is documented where the reader looks for it."""
+    from model.tracking import LEGACY_REGISTRY_PROJECT
+
+    assert LEGACY_REGISTRY_PROJECT == "model-registry"
+    assert REGISTRY_PROJECT != LEGACY_REGISTRY_PROJECT
 
 
 def test_linking_without_a_promoted_stage_is_refused(tmp_path):

@@ -37,10 +37,18 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
-# The Registry surface rubric 1.3 is graded on. `model/registry.py` verifies exactly these
-# names anonymously; its test suite and this one cross-check the constants so two spellings
-# of "production" cannot pass both and still fail on the graded page.
-REGISTRY_PROJECT = "model-registry"
+# The Registry surface rubric 1.3 is graded on. `scripts/verify_public_registry.py` verifies
+# exactly these names anonymously; its checks and this module cross-check the constants so two
+# spellings of "production" cannot pass both and still fail on the graded page.
+#
+# `model-registry` is the LEGACY per-entity registry project. W&B migrated it away on this
+# organization and the backend now answers a link into it with
+# `400 The model registry has been migrated for teams in your organization. You may no longer
+# make changes.` -- observed 2026-08-01 against `rockcyber/model-registry/toxic-clf`. The
+# migrated registry is org-scoped and is addressed WITHOUT an entity prefix, because W&B
+# resolves the organization from the source artifact rather than from the path.
+REGISTRY_PROJECT = "wandb-registry-model"
+LEGACY_REGISTRY_PROJECT = "model-registry"
 MODEL_COLLECTION = "toxic-clf"
 PRODUCTION_ALIAS = "production"
 ARTIFACT_TYPE = "model"
@@ -252,7 +260,12 @@ def file_digest(path) -> str:
 
 
 def public_registry_url(entity: str, collection: str = MODEL_COLLECTION) -> str:
-    """The page rubric 1.3 is graded on, which must open with no credentials."""
+    """The page rubric 1.3 is graded on, which must open with no credentials.
+
+    `entity` here is the ORGANIZATION that owns the migrated registry (`rockcyber-org`), not
+    the team the run belongs to (`rockcyber`). They differ, and using the team's name yields a
+    URL that 404s in the app while still looking plausible in a receipt.
+    """
     return f"https://wandb.ai/{entity}/{REGISTRY_PROJECT}/artifacts/{ARTIFACT_TYPE}/{collection}"
 
 
@@ -275,6 +288,7 @@ def log_model_artifact(
     corpus=(),
     extra_metadata: dict | None = None,
     target_path: str | None = None,
+    registry_entity: str | None = None,
     artifact_factory=None,
 ) -> PromotedArtifact:
     """Log the skops model as a W&B artifact and link it into the Registry at a promoted stage.
@@ -285,14 +299,19 @@ def log_model_artifact(
     1. the promotion metric is not accuracy, and it is actually present in `metrics`;
     2. the aliases contain a promoted stage, because rubric 1.3 grades the stage, not the run;
     3. the config is the one `build_run_config` returns, so provenance travels with the file;
-    4. the registry path resolves, rather than linking into `None/model-registry/...`;
+    4. an entity is known, so the recorded public URL points somewhere rather than at `None`;
     5. the file is a skops archive from a skops at or above the advisory floor, not a pickle;
     6. the bytes on disk match the digest recorded independently (premortem H14);
     7. the artifact metadata carries no raw comment text.
 
-    `target_path` overrides the legacy `<entity>/model-registry/<collection>` address, which is
-    the one `model/registry.py` verifies anonymously; the newer W&B registry addresses a
-    collection as `wandb-registry-model/<collection>`.
+    The default link target is the migrated org-scoped registry,
+    `wandb-registry-model/<collection>`, with no entity prefix: W&B resolves the organization
+    from the source artifact's entity and rejects a path that names the team instead.
+    `target_path` overrides it.
+
+    `registry_entity` is the organization whose registry page is being published
+    (`rockcyber-org`). It defaults to the run's entity, which is correct only when the team and
+    the organization share a name -- they do not here, so the caller passes it.
     """
     if promotion_metric in FORBIDDEN_PROMOTION_KEYS or promotion_metric.startswith("accuracy"):
         raise ForbiddenPromotionMetric(
@@ -317,12 +336,13 @@ def log_model_artifact(
             f"config is missing {missing}; pass the dict build_run_config returns so the "
             f"artifact carries its own provenance"
         )
-    entity = getattr(run, "entity", None)
+    entity = registry_entity or getattr(run, "entity", None)
     if target_path is None and not entity:
         raise ValueError(
-            "the run has no entity, so the registry path would be "
-            f"'None/{REGISTRY_PROJECT}/{collection}' and the link would silently go nowhere; "
-            "pass entity= to wandb.init, or pass an explicit target_path"
+            "the run has no entity and no registry_entity was given, so the recorded registry "
+            f"URL would be 'https://wandb.ai/None/{REGISTRY_PROJECT}/...' -- a receipt that "
+            "looks like evidence and opens nothing; pass entity= to wandb.init, pass "
+            "registry_entity=, or pass an explicit target_path"
         )
 
     assert_safe_model_artifact(model_path)
@@ -357,7 +377,7 @@ def log_model_artifact(
     artifact = factory(name=collection, type=ARTIFACT_TYPE, metadata=metadata)
     artifact.add_file(str(model_path))
     logged = run.log_artifact(artifact, aliases=list(aliases)) or artifact
-    target = target_path or f"{entity}/{REGISTRY_PROJECT}/{collection}"
+    target = target_path or f"{REGISTRY_PROJECT}/{collection}"
     run.link_artifact(logged, target_path=target, aliases=list(aliases))
     url = public_registry_url(entity, collection) if entity else None
     # The digest on the run page is what lets a grader, or an incident responder, walk
