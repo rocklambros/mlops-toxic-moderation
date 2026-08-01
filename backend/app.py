@@ -39,6 +39,11 @@ log = logging.getLogger("backend.request")
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
+    # The record IS the JSON document, so no prefix is formatted around it: Phase 5's awslogs
+    # driver ships these lines straight into CloudWatch Logs Insights. `force=False` leaves an
+    # already-configured root logger alone, which is what keeps pytest's caplog handler and
+    # uvicorn's own configuration intact.
+    logging.basicConfig(level=logging.INFO, format="%(message)s", force=False)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
