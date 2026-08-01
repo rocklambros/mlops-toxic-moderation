@@ -297,8 +297,18 @@ class FinetuneSpec:
         The `PHASE1_*` assignments sit *outside* the shim because they are settings for the
         final process, not secrets to be recovered from PID 1; `execvp` carries them through.
         """
+        # A background sync copies each fold checkpoint into PHASE1_OUT the moment it lands.
+        # Retrieval used to run only after the whole stage finished, so folds sat on the
+        # pod's disk for over an hour with no copy anywhere -- and a spot preemption at 95%
+        # discarded all five. The CV has no resume path, unlike a fine-tune, so incremental
+        # egress is the only thing that makes a mid-run death survivable.
+        sync = (
+            f"(while sleep 60; do cp -u {shlex.quote(cache_dir)}/fold_*.npz "
+            f"{shlex.quote(cache_dir)}/oof.npz {shlex.quote(output_dir)}/ 2>/dev/null; done &) && "
+        )
         return (
-            f"PHASE1_CACHE={shlex.quote(cache_dir)} PHASE1_OUT={shlex.quote(output_dir)} "
+            sync
+            + f"PHASE1_CACHE={shlex.quote(cache_dir)} PHASE1_OUT={shlex.quote(output_dir)} "
             + " ".join(POD_ENV_SHIM)
             + " --require WANDB_API_KEY -- python run_phase1.py cv thresholds"
         )
@@ -513,7 +523,7 @@ def build_pod_payload(
     image: str = POD_IMAGE,
     container_disk_gb: int = 60,
     volume_gb: int = 40,
-    interruptible: bool = True,
+    interruptible: bool = True,  # see run_finetune: classical CV overrides this to False
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """The exact JSON body for `POST /pods`.
@@ -1363,7 +1373,10 @@ def main(argv: list[str] | None = None) -> int:
         plan = preflight(
             name=name,
             max_hours=args.max_hours,
-            interruptible=interruptible,
+            # Spot is right for a fine-tune, which resumes from a checkpoint. The classical
+            # CV cannot resume: a preemption discards every completed fold. One run was lost
+            # that way at 95% complete. The on-demand premium is cents against 85 minutes.
+            interruptible=interruptible and not args.classical,
             registry_path=args.registry,
             candidates=(args.gpu,) if args.gpu else GPU_CANDIDATES,
             max_hourly_usd=args.max_hourly_usd,
