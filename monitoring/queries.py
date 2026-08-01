@@ -52,6 +52,10 @@ def latency_over_time(conn, since: dt.datetime) -> list[LatencyBucket]:
     holding one 5-second outlier reports neither the typical request nor the outlier.
     """
     rows = conn.execute(
+        # `_DAY_BUCKET` is a module-level constant and `since` is a bound parameter.
+        # `percentile_cont ... WITHIN GROUP` is an ordered-set aggregate with no ORM
+        # expression form, which is why this query is written in SQL at all.
+        # nosemgrep: avoid-sqlalchemy-text
         text(
             f"SELECT {_DAY_BUCKET} AS bucket, count(*) AS n, "
             "percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms) AS p50, "
@@ -101,6 +105,10 @@ def production_flag_rates(
     conn, since: dt.datetime, thresholds: dict[str, float]
 ) -> tuple[int, dict[str, float]]:
     row = conn.execute(
+        # `_flag_sum_sql()` emits one `sum(...)` per label from LABELS and compares each
+        # probability against a BOUND threshold placeholder; the caller's thresholds reach
+        # the database through `_threshold_binds`, never through the string.
+        # nosemgrep: avoid-sqlalchemy-text
         text(f"SELECT count(*) AS n, {_flag_sum_sql()} FROM predictions WHERE ts >= :since"),
         {"since": since, **_threshold_binds(thresholds)},
     ).mappings().one()
@@ -143,6 +151,9 @@ def drift_report(
 
 def flag_rate_series(conn, since: dt.datetime, thresholds: dict[str, float]) -> pd.DataFrame:
     rows = conn.execute(
+        # Both interpolations are the module constants above; `since` and every threshold are
+        # bound parameters.
+        # nosemgrep: avoid-sqlalchemy-text
         text(
             f"SELECT {_DAY_BUCKET} AS bucket, count(*) AS n, {_flag_sum_sql()} "
             "FROM predictions WHERE ts >= :since GROUP BY 1 ORDER BY 1"

@@ -185,3 +185,33 @@ seed-demo:
 
 seed-demo-purge:
 	PYTHONHASHSEED=0 $(BIN)/python -m scripts.seed_demo --csv $(SEED_CSV) --purge --n 0
+
+.PHONY: scan gitleaks-checksums
+
+# The three scans the CI gate runs, so a red `secrets-scan`, `sast` or `deps-audit` is
+# reproducible locally in one step instead of by reading the workflow and retyping it.
+#
+# The scanners resolve into a THROWAWAY venv rather than $(VENV). requirements/security.in is
+# deliberately isolated from the development surface -- semgrep drags in sixty packages that
+# resolve differently on aarch64 -- and installing it into the environment the test suite runs
+# in would undo that isolation in one command. `.venv-scan` is left behind on failure on
+# purpose, so the scan can be re-run against the same tree without recompiling it.
+scan: check-py
+	./scripts/install_gitleaks.sh
+	./bin/gitleaks detect --source . --redact --no-banner --exit-code 1
+	rm -rf .venv-scan
+	$(PY) -m venv .venv-scan
+	.venv-scan/bin/pip install --require-hashes --only-binary=:all: -r requirements/security.txt
+	.venv-scan/bin/semgrep scan --config p/python --config p/secrets --error \
+	  --metrics=off --disable-version-check .
+	PATH="$(CURDIR)/.venv-scan/bin:$$PATH" ./scripts/run_pip_audit.sh
+
+# Regenerates scripts/gitleaks.sha256 from the release's own published checksums, so the file
+# scripts/install_gitleaks.sh verifies against is never transcribed by hand. Run when the
+# pinned VERSION in that script changes.
+GITLEAKS_VERSION ?= 8.21.2
+gitleaks-checksums:
+	curl --fail --silent --show-error --location \
+	  https://github.com/gitleaks/gitleaks/releases/download/v$(GITLEAKS_VERSION)/gitleaks_$(GITLEAKS_VERSION)_checksums.txt \
+	  | grep -E 'linux_(arm64|x64)\.tar\.gz$$' > scripts/gitleaks.sha256
+	@cat scripts/gitleaks.sha256
