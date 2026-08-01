@@ -181,6 +181,73 @@ def test_phase_3_writers_are_not_documented_as_phase_2_functions():
     assert "write_distilbert_probs" not in documented
 
 
+def _documented_parameters(node: ast.FunctionDef) -> list[str]:
+    """Positional and keyword-only, in declaration order.
+
+    `node.args.args` alone drops everything after `*`, and both admission functions are
+    keyword-only past the connection -- deliberately, so a caller cannot transpose
+    `source` and `submitter_fp`. Comparing only the positional slice would call two
+    signatures equal while they disagreed about every argument that matters.
+    """
+    return [argument.arg for argument in node.args.posonlyargs + node.args.args] + [
+        argument.arg for argument in node.args.kwonlyargs
+    ]
+
+
+def test_the_documented_phase_3_seams_match_the_shipped_signatures():
+    """H24 again, for the interfaces Phase 4's CI gate and Phase 5's deploy build against.
+
+    Documenting a seam and never comparing it to the code is how the block drifted the first
+    time. Every function named in the Phase 3 sub-block is checked against the live one here,
+    and the check is what makes writing it down worth anything.
+    """
+    from backend.feedback import derive_feedback, insert_feedback, user_feedback
+    from backend.queue_guard import admit_review, admit_user_feedback
+    from backend.reviewer_auth import current_reviewer, issue_session_token
+    from rescorer.challenger import load_challenger
+    from rescorer.worker import drain_once
+
+    tree = _contract_ast()
+    seams = {
+        "admit_review": admit_review,
+        "admit_user_feedback": admit_user_feedback,
+        "derive_feedback": derive_feedback,
+        "user_feedback": user_feedback,
+        "insert_feedback": insert_feedback,
+        "issue_session_token": issue_session_token,
+        "current_reviewer": current_reviewer,
+        "load_challenger": load_challenger,
+        "drain_once": drain_once,
+    }
+    for name, live in seams.items():
+        documented = _documented_parameters(_func(tree, name))
+        assert documented == list(inspect.signature(live).parameters), name
+
+
+def test_the_documented_review_api_surface_is_the_router_that_ships():
+    """The four routes are documented as comments, so nothing parses them into an AST. This
+    reads the router instead: a fifth write path added to `backend/review_api.py` without a
+    line in the block is an undocumented anonymous write surface."""
+    from backend.review_api import router
+
+    section = _section()
+    live = {
+        (method, route.path)
+        for route in router.routes
+        for method in route.methods
+        if method != "HEAD"
+    }
+    assert live == {
+        ("POST", "/review/login"),
+        ("GET", "/review/pending"),
+        ("POST", "/review/submit"),
+        ("POST", "/feedback/user"),
+    }, live
+    for _, path in live:
+        assert path in section, f"{path} is a live route with no line in the contract block"
+    assert 'extra="forbid"' in section, "the block must state that identity is unassertable"
+
+
 def test_the_documented_review_vocabulary_matches_the_check_constraint():
     """IFACE-DB-SCHEMA. `ck_review_source` rejects any value the doc and the table disagree
     on, and `user-report` is the H9 remedy Phase 3 depends on."""

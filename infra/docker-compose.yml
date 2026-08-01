@@ -52,6 +52,15 @@ services:
       SUBMITTER_FP_KEY: ${SUBMITTER_FP_KEY:?set SUBMITTER_FP_KEY}
       RANDOM_AUDIT_RATE: ${RANDOM_AUDIT_RATE:-0.05}
       SPOOL_PATH: /var/lib/toxic/predictions.spool
+      # Production defaults. `make seed-demo` replays ~2000 held-out comments through this
+      # endpoint from one peer address, so it needs the limit raised for the duration --
+      #   RATE_LIMIT_PER_MINUTE=4000 RATE_LIMIT_BURST=4000 docker compose ... up -d backend
+      # -- and lowered again afterwards. Deliberately an operator action with two visible
+      # variables rather than a retry loop inside the seeder: an abuse control that a tool
+      # quietly works around is not a control, and the seeder is the one thing in the
+      # repository allowed to write a chosen timestamp.
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-30}
+      RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-10}
     volumes:
       - ../artifacts:/artifacts:ro
     ports:

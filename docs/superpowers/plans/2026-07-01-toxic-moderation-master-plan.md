@@ -213,7 +213,7 @@ class PredictionResponse(BaseModel):
 @dataclass(frozen=True)
 class PredictionRow: ...     # request_id, ts, input_text, input_chars, model_version, probs,
                              # decision, max_prob, latency_ms, status, persist_status,
-                             # error_kind, client_fp
+                             # error_kind, client_fp, submitter_fp
 
 @dataclass(frozen=True)
 class ReviewIntent: ...      # request_id, source, sample_rate, input_text_snapshot, enqueued_ts
@@ -238,6 +238,42 @@ FEEDBACK_SOURCES = ("reviewer", "user")                          # ck_feedback_s
 FLAGGED_SAMPLE_RATE: float = 1.0     # written onto a review row whose source is 'flagged'
 ```
 
+**Phase 3's own writers.** These are the seams Phase 4's CI gate and Phase 5's deploy build
+against, so they are stated here rather than left to be read out of the modules.
+```python
+# backend/queue_guard.py -- admission control for both anonymous write paths
+@dataclass(frozen=True)
+class Admission: ...         # admitted: bool, reason: str
+def admit_review(conn, *, request_id, source, submitter_fp, now, config) -> Admission: ...
+def admit_user_feedback(conn, *, request_id, submitter_fp, now, config) -> Admission: ...
+
+# backend/feedback.py -- the two kinds of feedback row, and the one writer
+def derive_feedback(request_id, reviewer_labels, model_flags, reviewer_id) -> FeedbackRecord: ...
+def user_feedback(request_id, verdict) -> FeedbackRecord: ...
+def insert_feedback(conn, record, ts) -> None: ...
+
+# backend/reviewer_auth.py -- identity is server-derived, never client-asserted
+def issue_session_token(now, secret, reviewer_id, ttl_seconds) -> str: ...
+def current_reviewer(token, now, secret, reviewer_id) -> str | None: ...
+
+# backend/review_api.py -- the UI's entire write surface
+# POST /review/login   {secret}                  -> {token}
+# GET  /review/pending ?limit=                   -> {items: [...]}      (Bearer token)
+# POST /review/submit  {request_id, labels}      -> {request_id, exact_match}  (Bearer token)
+#      no reviewer_id field, and extra="forbid": the identity comes from the verified session
+# POST /feedback/user  {request_id, verdict}     -> {request_id, verdict}   (no credential)
+
+# rescorer/ -- item 3 on the cut list, imported by nothing above it
+def load_challenger(artifact_dir, expected_sha256, *, model_filename, session,
+                    tokenizer) -> Challenger: ...
+def drain_once(conn, challenger, batch_size) -> int: ...
+```
+
+`load_challenger`'s `model_filename` is what makes the ONNX variant a configuration choice.
+The float32 export is the valid artifact; the int8 one is refused by the same load-time
+parity gate until a re-export passes it, and switching between them is
+`CHALLENGER_MODEL_FILE` plus `CHALLENGER_SHA256`, not a code change.
+
 `write_pending` is the seam, not `insert_prediction(session, response, input_text)`: a failed
 request has no `PredictionResponse` and must still write a row, and the spool has to replay a
 prediction *and* its review row through one code path.
@@ -252,9 +288,9 @@ deploy-time setting that may change between rows.
 `PredictionResponse.model_version` carries `LoadedModel.public_version`. The full version goes
 to `predictions.model_version` and to the structured request log, never to a client.
 
-Phase 3 owns `submit_review(...)` and `write_distilbert_probs(...)`. Both need reviewer session
-identity and re-scorer status semantics that do not exist in Phase 2; the tables they write are
-defined here.
+Phase 3 owns its own writers, listed above. They need reviewer session identity and re-scorer
+status semantics that do not exist in Phase 2; the tables they write are defined here. Phase 2
+must not be read as providing them.
 
 **W&B artifact naming.** Classical artifact `toxic-clf`, DistilBERT artifact `toxic-distilbert`. Versions `:vN`. The pinned digest travels as `@sha256:...` in the model card and the deploy env var `MODEL_DIGEST`.
 
