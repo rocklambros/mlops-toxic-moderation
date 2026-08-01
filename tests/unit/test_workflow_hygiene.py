@@ -286,8 +286,15 @@ def ci_contract_problems(doc: dict, text: str) -> list[str]:
     runs = run_text(doc)
     if "ruff check" not in runs:
         problems.append("rubric 4.2 names a linter; no `ruff check` runs")
-    if not re.search(r"pytest[^\n]*-m\s+[\"']not integration[\"']", runs):
+    if not re.search(r"pytest[^\n]*-m\s+[\"']not integration[^\"']*[\"']", runs):
         problems.append("the unit half of the suite is not run")
+    if not re.search(r"pytest[^\n]*-m\s+[\"'][^\"']*not awsapply[^\"']*[\"']", runs):
+        problems.append(
+            "the unit job does not exclude `awsapply`. tests/infra is auto-marked awsapply "
+            "and IS selected by `-m \"not integration\"` -- the premortem's claim that it "
+            "never runs in pull-request CI is false. A runner has no AWS session, so the "
+            "first AWS-calling test to land there fails the gate"
+        )
     if not re.search(r"pytest[^\n]*-m\s+integration\b", runs):
         problems.append(
             "rubric 4.1 requires integration tests for the FastAPI endpoints; 'full test "
@@ -386,7 +393,7 @@ jobs:
       TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@{PLACEHOLDER_SHA}  # v4.2.2
-      - run: pytest -m "not integration" --cov --cov-report=
+      - run: pytest -m "not integration and not awsapply" --cov --cov-report=
       - run: pytest -m integration --cov --cov-append --cov-fail-under=80
   secrets-scan:
     runs-on: ubuntu-24.04-arm
@@ -510,7 +517,7 @@ def test_each_check_fires_on_the_shape_it_exists_to_catch(old, new, check, expec
     [
         ("    branches: [main]", "    branches: [develop]", "not ['develop']"),
         ("      - run: ruff check .\n", "", "names a linter"),
-        ('pytest -m "not integration"', "pytest -k nothing", "unit half"),
+        ('pytest -m "not integration and not awsapply"', "pytest -k nothing", "unit half"),
         ("pytest -m integration --cov --cov-append --cov-fail-under=80",
          "pytest -k nothing", "both halves"),
         ("--cov-fail-under=80", "--cov-report=term", "coverage floor"),

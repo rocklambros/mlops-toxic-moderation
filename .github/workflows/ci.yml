@@ -91,7 +91,7 @@ jobs:
           python -m pip install --require-hashes --only-binary=:all:
           -r requirements/dev.lock
       - name: Unit tests
-        run: pytest -m "not integration" --cov --cov-report=
+        run: pytest -m "not integration and not awsapply" --cov --cov-report=
       # Rubric 4.1's floor, on the APPENDED total: measuring only the unit half reports the
       # FastAPI endpoints as zero, and measuring only the integration half hides every pure
       # function in `model`.
