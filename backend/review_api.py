@@ -165,6 +165,11 @@ def pending(request: Request, limit: int = 20, authorization: str | None = Heade
     with _connection(request) as conn:
         rows = (
             conn.execute(
+                # The only interpolation is `prob_columns`, built from LABELS, a module-level
+                # tuple. `limit` -- the one caller-supplied value -- is a bound parameter, and
+                # clamped besides. A six-column projection whose names come from the label set
+                # has no ORM expression form that does not re-import the same constant.
+                # nosemgrep: avoid-sqlalchemy-text
                 text(
                     f"SELECT q.request_id, q.enqueued_ts, q.source, q.status, "
                     f"q.input_text_snapshot, q.distilbert_probs, {prob_columns} "
@@ -210,6 +215,10 @@ def submit(
     with _connection(request) as conn:
         row = (
             conn.execute(
+                # Same shape: the concatenated column list comes from LABELS, and `rid` is a
+                # bound parameter. `FOR UPDATE OF q` -- the row lock this handler's
+                # idempotency depends on -- has no equivalent in the ORM expression language.
+                # nosemgrep: avoid-sqlalchemy-text
                 text(
                     "SELECT q.status, " + ", ".join(f"p.prob_{label}" for label in LABELS) + " "
                     "FROM review_queue q JOIN predictions p ON p.request_id = q.request_id "

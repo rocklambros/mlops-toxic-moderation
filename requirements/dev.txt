@@ -1,5 +1,16 @@
 -r base.txt
+# The serving surface, so ONE lock is everything the unit and integration jobs need. Without
+# it `make venv` produces an environment in which backend.db (SQLAlchemy) and backend.app
+# (FastAPI) cannot be imported, seven test modules fail to collect, and the only way to a
+# green run is a second install nobody wrote down. `-r serve.in`, not `-r serve.txt`: the
+# compiled lock is an output, and compiling one lock from another makes a hand-edit to the
+# input silently disappear at the next `make lock`.
+-r serve.in
 pytest==9.0.3
+# Phase 4's coverage floor (`make test-cov`, --cov-fail-under=80). Pinned at 7.1.0 rather
+# than the plan's 6.0.0: this repository runs pytest 9, and pytest-cov 6.0.0 was released
+# against pytest 8.
+pytest-cov==7.1.0
 ruff==0.7.4
 # Integration tests run against a real Postgres, never SQLite: the schema uses JSONB and
 # ON CONFLICT, and delivery spec section 3.3 makes a real dependency the phase gate.

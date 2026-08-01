@@ -499,7 +499,10 @@ def build_bootstrap(
             "fi",
             "command -v sshd >/dev/null && (service ssh start || /usr/sbin/sshd) || true",
             f"mkdir -p {shlex.quote(REMOTE_DATA_DIR)} {shlex.quote(REMOTE_OUTPUT_DIR)}",
-            "python -m pip install --no-cache-dir --upgrade pip",
+            # No `pip install --upgrade pip`. Bootstrapping the tool that checks integrity by
+            # fetching it without checking integrity is the circularity the supply-chain
+            # control exists to remove, and the image's bundled pip installs these wheels
+            # perfectly well.
             f"python -m pip install --no-cache-dir {wheels}",
             f"touch {shlex.quote(READY_SENTINEL)}",
             'echo "bootstrap complete; idling for the driver"',

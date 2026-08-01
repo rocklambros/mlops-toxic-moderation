@@ -113,3 +113,44 @@ until the day-8 row carries `MET`/`NOT MET` and its pre-committed action.
 for that checkpoint, replace `PENDING` with `MET` or `NOT MET`, replace `not due` with `cut`
 or `no cut`, name the items in column five if anything was cut, and set the date to the day
 you evaluated it.
+
+## Cut: the scheduled `runpod-reaper` workflow (2026-08-01, day 3)
+
+**Item cut:** `.github/workflows/runpod-reaper.yml`, the scheduled sweep that would terminate
+orphaned RunPod pods. **Replaced by**, not merely dropped: a one-shot teardown on the machine
+that launches pods, plus three independent in-band ceilings.
+
+**Why.** A scheduled GitHub workflow can only reap what it can authenticate to, so it needs
+`RUNPOD_API_KEY` as a repository secret. This repository is public and holds **zero project
+secrets** by design — every credential lives in `pass` on the launching box, and the only
+token any workflow sees is the auto-minted `GITHUB_TOKEN`. Adding a long-lived GPU-billing
+credential to a public repository, to guard against a failure mode that three cheaper controls
+already bound, trades a certain exposure for an uncertain one.
+
+**What actually bounds the cost, and the evidence each has run.**
+
+1. **Lease-scoped teardown.** `PodLease` terminates on both the success and the failure path.
+   Across this project: **four pods launched, four terminated, $1.51 total, zero leaked** —
+   including two runs that failed (one on a bundle-format check, one on the ONNX parity gate)
+   and still tore down.
+2. **An in-pod dead-man switch.** The container's own init ends with
+   `exec timeout --signal=TERM 10800 sleep infinity`, so a pod self-terminates after three
+   hours **even if the launching machine dies mid-run**. This is the control that survives the
+   scenario a scheduled reaper is usually justified by. Worst case per pod at the observed
+   $0.44/hr is about $1.32.
+3. **A per-run spend cap.** `--max-run-usd` is refused at launch if the projected worst case
+   exceeds it, so a mis-sized request fails before it bills.
+4. **Registry-before-readiness.** `infra/runpod/runpod_pods.json` is written *before* a pod is
+   usable, so a pod that exists is always a pod that is recorded, and
+   `python -m infra.runpod.terminate_runpod` can sweep it by hand in one command.
+
+**Residual risk, stated plainly.** If the launching box dies, a pod bills until its three-hour
+switch fires — bounded, not zero. A scheduled reaper would shorten that window to its cron
+interval. That is the trade: a bounded, self-limiting exposure of about $1.32 per pod against
+a permanent GPU-billing credential in a public repository.
+
+**Reversal condition.** If pods are ever launched from CI rather than from the Jetson, this cut
+must be revisited — the in-pod switch remains, but the lease no longer has an owner watching it.
+
+Phase 1's training is complete and no further pods are scheduled; the only anticipated launch
+is a single int8 re-export (task #27).

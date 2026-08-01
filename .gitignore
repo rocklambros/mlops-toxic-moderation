@@ -82,6 +82,12 @@ htmlcov/
 # Python virtualenvs
 /.venv/
 /.venv-lock/
+/.venv-scan/
+
+# The checksum-verified gitleaks binary, fetched by scripts/install_gitleaks.sh on the
+# runner and on the build box. The checksum is committed (scripts/gitleaks.sha256); the
+# 11 MB binary is not.
+/bin/
 
 # Raw dataset, fetched by scripts/fetch_jigsaw.sh, never committed
 /data/raw/

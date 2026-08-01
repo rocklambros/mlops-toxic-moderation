@@ -20,7 +20,7 @@ name: mlops-toxic-moderation
 
 services:
   postgres:
-    image: postgres:16.4-alpine
+    image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
     environment:
       # A throwaway local container on 5433, holding replayed public Jigsaw comments. In AWS
       # this is RDS and the password is an SSM SecureString, never a compose literal.
