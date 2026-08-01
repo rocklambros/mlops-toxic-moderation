@@ -1,0 +1,14 @@
+# The dependency-vulnerability scanner and the SAST engine (Phase 4's `make scan` and the
+# CI deps-audit and sast jobs).
+#
+# Deliberately isolated from the development surface. semgrep drags in a large dependency
+# tree -- OpenTelemetry, glom, ruamel.yaml, peewee -- that resolves differently on aarch64
+# from x86, and a resolution failure in a scanner must not be able to stop the test suite
+# from being lockable at all. Nothing in requirements/dev.lock installs either of these, and
+# tests/unit/test_dependency_locks.py asserts that separation rather than trusting it.
+#
+# Resolved on aarch64, wheels-only, and installed on `ubuntu-24.04-arm` runners. A lock
+# compiled here does NOT install on an x86 runner: semgrep ships per-architecture wheels and
+# `--only-binary=:all:` records the hashes of the ones this platform can use.
+pip-audit==2.7.3
+semgrep==1.96.0

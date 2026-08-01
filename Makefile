@@ -63,7 +63,7 @@ lock-tools: check-py
 lock: check-py
 	$(PY) -m venv .venv-lock
 	.venv-lock/bin/pip install --only-binary=:all: pip-tools==7.4.1
-	.venv-lock/bin/pip-compile --generate-hashes --allow-unsafe \
+	PIP_ONLY_BINARY=:all: .venv-lock/bin/pip-compile --generate-hashes --allow-unsafe \
 	  --output-file requirements/dev.lock requirements/dev.txt
 	rm -rf .venv-lock
 
@@ -91,7 +91,7 @@ fetch-data:
 serve-deps: check-py
 	$(PY) -m venv .venv-lock
 	.venv-lock/bin/pip install --only-binary=:all: pip-tools==7.4.1
-	.venv-lock/bin/pip-compile --generate-hashes \
+	PIP_ONLY_BINARY=:all: .venv-lock/bin/pip-compile --generate-hashes \
 	  --output-file requirements/serve.txt requirements/serve.in
 	rm -rf .venv-lock
 	$(BIN)/pip install --require-hashes --only-binary=:all: -r requirements/serve.txt
@@ -110,11 +110,20 @@ test-integration:
 ui-lock: check-py
 	$(PY) -m venv .venv-lock
 	.venv-lock/bin/pip install --only-binary=:all: pip-tools==7.4.1
-	.venv-lock/bin/pip-compile --generate-hashes \
+	PIP_ONLY_BINARY=:all: .venv-lock/bin/pip-compile --generate-hashes \
 	  --output-file requirements/ui.txt requirements/ui.in
 	rm -rf .venv-lock
 
-.PHONY: monitor-lock rescorer-lock
+.PHONY: monitor-lock rescorer-lock security-lock
+
+# The scanners. Their own surface, so a semgrep resolution failure on aarch64 cannot stop
+# the test suite from being lockable (see the header of requirements/security.in).
+security-lock: check-py
+	$(PY) -m venv .venv-lock
+	.venv-lock/bin/pip install --require-hashes --only-binary=:all: -r requirements/pip-tools.txt
+	PIP_ONLY_BINARY=:all: .venv-lock/bin/pip-compile --generate-hashes --allow-unsafe \
+	  --output-file requirements/security.txt requirements/security.in
+	rm -rf .venv-lock
 
 # The monitoring dashboard's own surface. It carries a database driver, unlike the two
 # user-facing Streamlit images, because rubric 3.2 requires the dashboard to read the
@@ -122,7 +131,7 @@ ui-lock: check-py
 monitor-lock: check-py
 	$(PY) -m venv .venv-lock
 	.venv-lock/bin/pip install --only-binary=:all: pip-tools==7.4.1
-	.venv-lock/bin/pip-compile --generate-hashes \
+	PIP_ONLY_BINARY=:all: .venv-lock/bin/pip-compile --generate-hashes \
 	  --output-file requirements/monitor.txt requirements/monitor.in
 	rm -rf .venv-lock
 
@@ -131,7 +140,7 @@ monitor-lock: check-py
 rescorer-lock: check-py
 	$(PY) -m venv .venv-lock
 	.venv-lock/bin/pip install --only-binary=:all: pip-tools==7.4.1
-	.venv-lock/bin/pip-compile --generate-hashes \
+	PIP_ONLY_BINARY=:all: .venv-lock/bin/pip-compile --generate-hashes \
 	  --output-file requirements/rescorer.txt requirements/rescorer.in
 	rm -rf .venv-lock
 
