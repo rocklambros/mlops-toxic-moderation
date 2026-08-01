@@ -1,0 +1,1 @@
+{"checks":[{"conclusion":"FAILURE","name":"lint"},{"conclusion":"FAILURE","name":"test"},{"conclusion":"SUCCESS","name":"secrets-scan"},{"conclusion":"SUCCESS","name":"sast"},{"conclusion":"SUCCESS","name":"deps-audit"},{"conclusion":"SUCCESS","name":"terraform"},{"conclusion":"FAILURE","name":"ci-gate"}],"mergeStateStatus":"BLOCKED","mergeable":"MERGEABLE"}

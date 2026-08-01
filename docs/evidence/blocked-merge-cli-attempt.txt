@@ -1,0 +1,4 @@
+X Pull request rocklambros/mlops-toxic-moderation#15 is not mergeable: the base branch policy prohibits the merge.
+To have the pull request merged after all the requirements have been met, add the `--auto` flag.
+To use administrator privileges to immediately merge the pull request, add the `--admin` flag.
+GraphQL: Required status check "ci-gate" is failing. (mergePullRequest)
