@@ -144,6 +144,14 @@ locals {
     "/toxic/logs/monitoring" = aws_cloudwatch_log_group.app["monitoring"].name
     "/toxic/logs/rescorer"   = aws_cloudwatch_log_group.app["rescorer"].name
 
+    # ECR repository NAMES, so roll.sh resolves a tag to a digest without assuming how a
+    # repository is named. The plan for this phase assumed `toxic-<component>`; the applied
+    # account has `toxic-mod-<component>`, and every image reference would have been wrong.
+    "/toxic/images/backend"    = aws_ecr_repository.app["backend"].name
+    "/toxic/images/frontend"   = aws_ecr_repository.app["frontend"].name
+    "/toxic/images/monitoring" = aws_ecr_repository.app["monitoring"].name
+    "/toxic/images/rescorer"   = aws_ecr_repository.app["rescorer"].name
+
     # What verify_deploy.sh probes: the three public listeners on their stable Elastic IPs.
     "/toxic/endpoints/backend"    = "http://${aws_eip.backend.public_ip}:8000"
     "/toxic/endpoints/frontend"   = "http://${aws_eip.frontend.public_ip}:8501"
