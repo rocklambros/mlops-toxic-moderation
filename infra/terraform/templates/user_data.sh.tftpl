@@ -103,14 +103,55 @@ install -d -m 0755 "$APP_DIR" "$STATE_DIR" "$STATE_DIR/artifacts" "$STATE_DIR/sp
 install -d -m 0700 /etc/toxic
 
 # ---------------------------------------------------------------------------
-# 2. Docker engine
+# 2. Prove there is a route out before anything needs one (premortem H26)
+#
+# aws_eip_association runs AFTER this instance is created, so until it lands the
+# only route out is the address the subnet auto-assigns. network.tf sets
+# map_public_ip_on_launch on both public subnets for exactly this reason. If it
+# is ever turned off there is no route at all: package installs hang, the
+# Compose download fails, and the SSM Agent never reaches ssm and ssmmessages on
+# 443 -- so the instance never registers, and with no SSH, no bastion and no NAT
+# that is an unrecoverable box. The worst version of that is a silent hang, so
+# the wait is bounded and names the three knobs to check when it gives up.
+#
+# The loop probes the regional SSM endpoint, because SSM reachability is the
+# property that decides whether this host is recoverable at all. `-f` is
+# deliberately absent: any HTTP response, including an unauthenticated 404,
+# proves DNS, routing and a TLS handshake on 443. Authorisation is a different
+# question and is not this one. The loop is the retry, so the probe does not
+# also retry internally.
+# ---------------------------------------------------------------------------
+EGRESS_WAIT_SECONDS=300
+
+wait_for_egress() {
+  local deadline
+  deadline=$(( $(date +%s) + EGRESS_WAIT_SECONDS ))
+  until curl -sS -o /dev/null --max-time 8 "https://ssm.$REGION.amazonaws.com"; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      console "TOXIC-USER-DATA-FAILED component=$COMPONENT reason=no egress route after $EGRESS_WAIT_SECONDS seconds -- check map_public_ip_on_launch on the public subnets, the 0.0.0.0/0 route on the public route table, and the security group egress rules"
+      return 1
+    fi
+    sleep 5
+  done
+}
+
+wait_for_egress
+# Which address this host actually goes out as. Diagnostic, not a gate: before
+# the EIP associates it is the subnet's auto-assigned address and afterwards it
+# is the Elastic IP, and knowing which one answered is the difference between
+# "the association has not landed yet" and "the association is broken".
+curl -fsS --retry 3 --retry-delay 2 --max-time 15 -o /var/log/toxic-egress-address https://checkip.amazonaws.com
+console "TOXIC-USER-DATA-EGRESS-OK component=$COMPONENT address=$(cat /var/log/toxic-egress-address)"
+
+# ---------------------------------------------------------------------------
+# 3. Docker engine
 # ---------------------------------------------------------------------------
 dnf -y install docker
 systemctl enable --now docker
 usermod -aG docker ec2-user
 
 # ---------------------------------------------------------------------------
-# 3. Docker Compose v2 plugin
+# 4. Docker Compose v2 plugin
 #
 # `dnf install docker` installs the engine and the CLI and nothing else, so
 # `docker compose` does not exist until this block runs -- which is the failure
@@ -127,7 +168,7 @@ rm -rf "$compose_tmp"
 docker compose version
 
 # ---------------------------------------------------------------------------
-# 4. Container logs must leave the box (premortem H27)
+# 5. Container logs must leave the box (premortem H27)
 #
 # The daemon default is set so a container started by hand, by compose, or by
 # SSM Run Command all ship to CloudWatch without anyone remembering to pass
@@ -172,7 +213,7 @@ if ! systemctl restart docker || ! docker_ready; then
 fi
 
 # ---------------------------------------------------------------------------
-# 5. ECR login helper
+# 6. ECR login helper
 #
 # An ECR authorization token expires after 12 hours, so logging in once during
 # bootstrap would leave a stopped-then-started instance unable to pull. The
@@ -187,7 +228,7 @@ TOXICECRLOGIN
 chmod 0755 /usr/local/bin/toxic-ecr-login
 
 # ---------------------------------------------------------------------------
-# 6. Start the APPLICATION at boot, not just the instance (REG-5)
+# 7. Start the APPLICATION at boot, not just the instance (REG-5)
 #
 # The cost model instructs stopping EC2 and RDS between sessions and a nightly
 # EventBridge schedule enforces it, so this host is started far more often than
@@ -249,7 +290,7 @@ systemctl daemon-reload
 systemctl enable toxic-stack.service
 
 # ---------------------------------------------------------------------------
-# 7. Warm the ECR credential
+# 8. Warm the ECR credential
 #
 # Non-fatal and retried: an instance profile can take a few seconds to become
 # usable, and a transient 403 here must not abort a bootstrap that has already
