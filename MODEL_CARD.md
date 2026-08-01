@@ -130,3 +130,39 @@ be weighted rather than pooled.
 
 Raw input text is retained only in the access-restricted database, only for
 `INPUT_TEXT_RETENTION_DAYS` (30), and is never written to an application log line.
+
+## Artifact digest of record
+
+The serving backend refuses to load any artifact whose SHA-256 differs from this value, and
+refuses to start if the `MODEL_DIGEST` environment variable differs from it. This line is the
+provenance anchor: it lives in git rather than in the registry, so an attacker holding the
+registry credential cannot supply both the artifact and its expected digest. It is read by
+`backend/model_card.py::read_expected_digest` and cross-checked in
+`backend/model_loader.py::load_from_settings`.
+
+> **This value is a deliberate fail-closed placeholder, not a model digest.** Phase 1 has not
+> promoted an artifact yet, so no real digest exists to record. The value below is the
+> SHA-256 of a sentinel string rather than of any file, so *no* artifact can ever match it
+> and the loader refuses to start — which is the correct behaviour until a real model is
+> registered. Reproduce it with:
+>
+> ```bash
+> printf 'PENDING PHASE 1 PROMOTION: no artifact has this digest\n' | sha256sum
+> ```
+>
+> When Phase 1 promotes a model, replace `MODEL_REGISTRY_VERSION` and `MODEL_DIGEST` below
+> with values computed from the artifact **in hand**, never transcribed from the registry UI
+> — a transcribed digest is a digest the registry supplied, which is exactly the
+> co-location this control exists to break:
+>
+> ```bash
+> DIGEST=$(sha256sum artifacts/toxic-clf.skops | cut -d' ' -f1)
+> ```
+>
+> Note that `skops.io.dump` embeds ZIP entry timestamps and is therefore not
+> byte-reproducible: two dumps of the same fitted pipeline have different digests. The digest
+> of record must be taken from the exact artifact file that was uploaded to the registry.
+
+- MODEL_ARTIFACT: toxic-clf
+- MODEL_REGISTRY_VERSION: 0
+- MODEL_DIGEST: sha256:bde106e7c4b5a0b2aad58e6d0a78b03157f8a345622072d8c8ea4122fe0917c7
