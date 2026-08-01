@@ -43,3 +43,25 @@ data:
 
 fetch-data:
 	./scripts/fetch_jigsaw.sh
+
+.PHONY: serve-deps test-integration serve purge
+
+# Same supply-chain posture as `lock` and `venv`: pip-tools resolves in a throwaway venv so
+# the resolver never shares an environment with the project, and every install is
+# wheels-only so nothing executes a setup.py on a box holding live keys.
+serve-deps: check-py
+	$(PY) -m venv .venv-lock
+	.venv-lock/bin/pip install --only-binary=:all: pip-tools==7.4.1
+	.venv-lock/bin/pip-compile --generate-hashes \
+	  --output-file requirements/serve.txt requirements/serve.in
+	rm -rf .venv-lock
+	$(BIN)/pip install --require-hashes --only-binary=:all: -r requirements/serve.txt
+
+test-integration:
+	PYTHONHASHSEED=0 $(BIN)/pytest -m integration
+
+serve:
+	$(BIN)/uvicorn backend.app:create_app --factory --host 127.0.0.1 --port 8000
+
+purge:
+	$(BIN)/python -m backend.retention
