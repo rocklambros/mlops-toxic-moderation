@@ -82,7 +82,7 @@ Three instances, which is the literal reading of the rubric rather than a permis
 | EC2 #3 | `t4g.medium` (2 vCPU / 4 GB) | Monitoring dashboard, and the re-scorer if it lands | Drops to `t4g.small` if DistilBERT is cut; upsize only against measured ONNX throughput |
 | RDS | `db.t4g.micro`, Postgres 16, 20 GB gp3, Single-AZ | Shared state | Private subnets, `manage_master_user_password = true` |
 
-Roughly `$0.101/hr` with everything running, which is *cheaper* than the superseded two-instance design because EC2 #2 no longer has to be a `t4g.large` sized for a re-scorer that now sits behind a cut-line.
+Costed in full in [`docs/cost-model.md`](../../cost-model.md), which prices the fixed monthly charges that accrue while the stack is stopped as well as the per-hour running rate. An earlier draft of this line quoted an hourly figure as if it were the whole cost; that was the variable subtotal only, and it omitted roughly $27 per month that accrues whether or not anything is running (premortem H7). Three instances are still *cheaper* than the superseded two-instance design, because EC2 #2 no longer has to be a `t4g.large` sized for a re-scorer that now sits behind a cut-line.
 
 **The SCP instance-type allowlist must include `t4g.small`,** which the two-instance design never required. Omitting it denies the frontend launch. The allowlist deny must stay scoped to `Resource: "arn:aws:ec2:*:*:instance/*"` per the AWS foundation spec §5.1 trap, or it denies every launch including the intended ones.
 

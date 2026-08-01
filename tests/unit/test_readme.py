@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 README = Path("README.md")
+COST_MODEL = Path("docs/cost-model.md")
 
 
 def _text() -> str:
@@ -63,3 +64,27 @@ def test_readme_carries_no_account_id_and_no_secret_value():
 
 def test_readme_is_not_the_placeholder():
     assert "This README is a placeholder" not in _text()
+
+
+def test_readme_cost_agrees_with_the_cost_model():
+    """H7. An hourly rate for the running state omits the money that accrues while the
+    stack is stopped, which is most of the graded fortnight."""
+    body = _text()
+    model = COST_MODEL.read_text(encoding="utf-8")
+    fixed = re.search(r"Fixed monthly subtotal.*?\$([0-9.]+)", model, re.S)
+    assert fixed, "docs/cost-model.md must state a 'Fixed monthly subtotal'"
+    assert fixed.group(1) in body, (
+        "the README omits the fixed monthly cost that accrues while stopped"
+    )
+    assert "$0.101" not in body
+    assert re.search(r"Scenario C|full billing month|worst case", body), (
+        "state the worst-case month, not just the hourly rate"
+    )
+
+
+def test_readme_names_the_budget_and_the_hard_control_not_only_the_alert():
+    body = _text()
+    assert "$100" in body
+    assert "nightly stop" in body.lower() or "stops the instances" in body.lower(), (
+        "a budget alert is a notification; name the control that actually stops spend"
+    )

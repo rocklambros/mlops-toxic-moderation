@@ -252,9 +252,22 @@ cannot destroy a reviewer's evidence mid-workflow, and that snapshot has its own
 
 ## Cost
 
-About `$0.10/hour` with all three instances and RDS running, against a `$100`/month budget
-with alerts at 50, 80, and 100 percent. A service control policy denies every instance type
-outside a four-entry Graviton allowlist, which is a hard denial rather than an alert.
+Two numbers matter, and the hourly one is the smaller.
+
+| | Amount | When it accrues |
+|---|---|---|
+| Fixed monthly | `$26.65` | **Always** — Elastic IPs on stopped instances, RDS storage and snapshots, ECR, CloudWatch Logs, S3, GuardDuty, CloudTrail |
+| Variable hourly | `$0.100` | Only while the three instances and RDS are running |
+
+Worst case, a full billing month with the stack up around the clock, is scenario C in
+[`docs/cost-model.md`](docs/cost-model.md) at `$99.65`. That document prices every line item
+and is the figure of record. The realistic graded fortnight, with the nightly stop schedule
+in force, is scenario A at `$28.28`.
+
+The `$100`/month budget carries alerts at 50, 80 and 100 percent, and — because an alert is
+a notification and not a control — a **nightly stop** of all three instances and the
+database, plus a service control policy that denies every instance type outside a four-entry
+Graviton allowlist. That denial is a hard refusal, not a warning.
 
 ## Licence and provenance
 
