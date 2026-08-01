@@ -54,8 +54,8 @@ Inherited from the master roadmap and `docs/superpowers/specs/2026-07-30-deliver
 - `backend/model_card.py` — `read_expected_digest`.
 - `backend/model_loader.py` — `TRUSTED_TYPES`, `LoadedModel`, `load_model`, `load_from_settings`, `sha256_file`, `ModelIntegrityError`.
 - `backend/policy.py` — `DecisionResult`, `decide`, `load_thresholds`.
-- `backend/audit.py` — `should_random_audit`, `FLAGGED_INCLUSION_PROBABILITY`.
-- `backend/db.py` — ORM models, `PredictionRow`, `ReviewIntent`, `PendingWrite`, `make_engine`, `init_schema`, `insert_prediction`, `enqueue_review`, `fetch_pending_reviews`, `write_pending`.
+- `backend/audit.py` — `should_random_audit`, `FLAGGED_SAMPLE_RATE`.
+- `backend/db.py` — ORM models, `PredictionRow`, `ReviewIntent`, `PendingWrite`, `make_engine`, `init_db` (alias `init_schema`), `insert_prediction`, `enqueue_review`, `fetch_pending_reviews`, `write_pending`, `with_persist_status`.
 - `backend/spool.py` — `Spool`, `SpoolFull`.
 - `backend/persistence.py` — `PersistResult`, `persist_prediction`, `drain_spool`.
 - `backend/ratelimit.py` — `RateLimiter`.
@@ -104,7 +104,7 @@ decide(probs: dict[str, float], thresholds: dict[str, float]) -> DecisionResult
 load_thresholds(path: Path) -> dict[str, float]
 
 # backend/audit.py
-FLAGGED_INCLUSION_PROBABILITY: float = 1.0
+FLAGGED_SAMPLE_RATE: float = 1.0
 should_random_audit(rate: float, rng: random.Random) -> bool
 
 # backend/db.py
@@ -112,7 +112,7 @@ should_random_audit(rate: float, rng: random.Random) -> bool
 @dataclass(frozen=True) class ReviewIntent: ...
 @dataclass(frozen=True) class PendingWrite: prediction: PredictionRow; review: ReviewIntent | None
 make_engine(settings) -> Engine                        # bounded pool, 2s checkout timeout
-init_schema(engine) -> None
+init_db(engine) -> None                                # Task 10a; init_schema is an alias
 insert_prediction(session, row: PredictionRow) -> None            # idempotent on request_id
 enqueue_review(session, intent: ReviewIntent) -> None             # idempotent on request_id
 fetch_pending_reviews(session, limit: int) -> list[ReviewQueue]
@@ -1645,7 +1645,7 @@ git commit -m "Add moderation policy with hierarchically coherent flags"
 - Create: `backend/audit.py`
 - Test: `tests/unit/test_audit.py`
 
-**Interfaces produced:** `FLAGGED_INCLUSION_PROBABILITY`, `should_random_audit`
+**Interfaces produced:** `FLAGGED_SAMPLE_RATE`, `should_random_audit`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1655,11 +1655,11 @@ import random
 
 import pytest
 
-from backend.audit import FLAGGED_INCLUSION_PROBABILITY, should_random_audit
+from backend.audit import FLAGGED_SAMPLE_RATE, should_random_audit
 
 
 def test_flagged_rows_are_sampled_with_certainty():
-    assert FLAGGED_INCLUSION_PROBABILITY == 1.0
+    assert FLAGGED_SAMPLE_RATE == 1.0
 
 
 def test_rate_zero_never_audits():
@@ -1715,7 +1715,7 @@ submissions to miss the sample.
 
 import random
 
-FLAGGED_INCLUSION_PROBABILITY: float = 1.0
+FLAGGED_SAMPLE_RATE: float = 1.0
 
 
 def should_random_audit(rate: float, rng: random.Random) -> bool:
@@ -1742,9 +1742,17 @@ git commit -m "Add random-audit sampling with an explicit inclusion probability"
 
 **Files:**
 - Create: `backend/db.py`, `tests/integration/__init__.py`, `tests/integration/conftest.py`
+- Modify: `requirements/dev.txt`, `requirements/dev.lock`
 - Test: `tests/integration/test_db_schema.py`
 
 **Interfaces produced:** `Prediction`, `ReviewQueue`, `Feedback`, `PredictionRow`, `ReviewIntent`, `PendingWrite`, `make_engine`, `init_schema`, `insert_prediction`, `enqueue_review`, `fetch_pending_reviews`, `write_pending`
+
+**Dependency:** the conftest below imports `testcontainers.postgres`, which no earlier task
+installs. Add `testcontainers[postgres]==4.8.2` to `requirements/dev.txt` — it is a test
+dependency and must not enter `serve.in`, which builds the production image — and re-lock
+with `make lock PY=<release 3.11>`. `pip-compile` prefers the pins already in `dev.lock`, so
+this adds `certifi`, `charset-normalizer`, `docker`, `idna`, `requests`, `urllib3` and
+`wrapt` and moves nothing. Install with the usual wheels-only, hash-checked line.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2235,12 +2243,13 @@ def with_persist_status(pending: PendingWrite, persist_status: str) -> PendingWr
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `PYTHONHASHSEED=0 .venv/bin/pytest tests/integration/test_db_schema.py -v -m integration`
-Expected: 8 PASS. First run pulls `postgres:16-alpine` (about 15 s on the build box); subsequent runs reuse the layer.
+Expected: 8 PASS. First run pulls `postgres:16-alpine` and `testcontainers/ryuk` (about 15 s on the build box); subsequent runs reuse the layers.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/db.py tests/integration/__init__.py tests/integration/conftest.py tests/integration/test_db_schema.py
+git add backend/db.py tests/integration/__init__.py tests/integration/conftest.py \
+        tests/integration/test_db_schema.py requirements/dev.txt requirements/dev.lock
 git commit -m "Add prediction, review queue, and feedback tables with a bounded engine"
 ```
 
@@ -2265,34 +2274,41 @@ The estimator's semantics are why (a) and (b) must go Phase 3's way rather than 
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `tests/integration/test_db_schema.py`:
+Append to `tests/integration/test_db_schema.py`. `CheckConstraint` joins the existing
+`from sqlalchemy import select` line and `pathlib` the existing top-of-file imports rather
+than being re-imported at the bottom, which would be an `F811` redefinition:
+
 ```python
-from sqlalchemy import CheckConstraint
-from sqlalchemy.exc import IntegrityError
-
-from model.labels import LABELS
-
-
 def test_the_review_queue_sampling_column_has_exactly_one_name(session):
-    """Phase 3's admit_review and seed_demo write sample_rate. A surviving NOT NULL
-    inclusion_probability makes every enqueue a NotNullViolation on the real database."""
+    """Phase 3's admit_review and seed_demo write sample_rate. A surviving NOT NULL column
+    under the retired name makes every enqueue a NotNullViolation on the real database."""
     cols = {c.name for c in ReviewQueue.__table__.columns}
     assert "sample_rate" in cols
-    assert "inclusion_probability" not in cols
+    assert "inclusion" + "_probability" not in cols
 
 
 def test_a_user_report_row_may_carry_a_null_sample_rate(session):
-    """H9's referral path. Horvitz-Thompson must ignore rows of unknown inclusion."""
-    session.add(Prediction(request_id="r1", input_text="x", model_version="m",
-                           decision="allow", max_prob=0.1, latency_ms=5,
-                           persist_status="direct", **{f"prob_{l}": 0.1 for l in LABELS}))
+    """H9's referral path. Horvitz-Thompson must ignore rows of unknown inclusion.
+
+    `input_chars` and `status` are NOT NULL and carry no server default, so an ORM insert
+    that omits them fails on NotNullViolation before the constraint under test is reached.
+    """
+    session.add(Prediction(request_id="r1", input_text="x", input_chars=1, model_version="m",
+                           decision="allow", max_prob=0.1, latency_ms=5, status="ok",
+                           persist_status="direct",
+                           **{f"prob_{label}": 0.1 for label in LABELS}))
     session.add(ReviewQueue(request_id="r1", source="user-report", sample_rate=None,
                             input_text_snapshot="x"))
     session.commit()
+    assert session.get(ReviewQueue, "r1").sample_rate is None
 
 
 def test_a_design_stratum_row_cannot_omit_its_sample_rate(session):
-    with pytest.raises(IntegrityError):
+    """The parent prediction has to exist first: without it the row dies on the foreign key,
+    which is also an IntegrityError, and the test would pass while the CHECK was absent."""
+    insert_prediction(session, make_row(request_id="r2"))
+    session.commit()
+    with pytest.raises(IntegrityError, match="review_queue_sample_rate_ck"):
         session.add(ReviewQueue(request_id="r2", source="flagged", sample_rate=None))
         session.commit()
     session.rollback()
@@ -2319,15 +2335,30 @@ def test_the_schema_entry_point_has_the_name_phase_3_imports():
     assert hasattr(db, "init_db"), "Phase 3's conftest does `from backend.db import init_db`"
 
 
-def test_no_module_in_the_repo_still_says_inclusion_probability():
-    """A rename that misses one call site is a NotNullViolation on day 13, not a lint nit."""
-    import pathlib
+def test_no_module_in_the_repo_still_uses_the_retired_sampling_column_name():
+    """A rename that misses one call site is a NotNullViolation on day 13, not a lint nit.
+
+    The needle is assembled at runtime, and this test's own name avoids it, because a scan
+    whose only possible offender is the scanner can never go green. The repository root is
+    resolved from __file__ rather than from the working directory.
+    """
+    needle = "inclusion" + "_probability"
+    repo = pathlib.Path(__file__).resolve().parents[2]
     offenders = [
-        str(p) for p in pathlib.Path(".").rglob("*.py")
-        if ".venv" not in str(p) and "inclusion_probability" in p.read_text(encoding="utf-8")
+        str(path.relative_to(repo)) for path in repo.rglob("*.py")
+        if ".venv" not in str(path) and "__pycache__" not in path.parts
+        and needle in path.read_text(encoding="utf-8")
     ]
     assert not offenders, offenders
 ```
+
+**Task 10's own tests move with the schema**, in this same commit: `enqueue_review` callers
+pass `sample_rate=`, `test_review_row_records_its_inclusion_probability` becomes
+`test_review_row_records_its_sample_rate` (its old name is itself an offender the scan above
+finds), and `test_feedback_source_is_constrained_to_reviewer_or_user` writes
+`reviewer_id` / `agreement` / `exact_match` instead of `actor_id` / `agree`. A reviewer row
+needs a non-empty `agreement`, or `feedback_reviewer_agreement_ck` rejects it. `backend/audit.py`
+and `tests/unit/test_audit.py` carry the `FLAGGED_SAMPLE_RATE` rename.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -2350,6 +2381,10 @@ class ReviewQueue(Base):
         CheckConstraint(
             "source in ('flagged','random-audit','user-report')", name="ck_review_source"
         ),
+        # ck_review_status is unrelated to this reconciliation and survives unchanged.
+        CheckConstraint(
+            "status in ('pending','rescored','reviewed','expired')", name="ck_review_status"
+        ),
         # A design stratum must carry the π it was drawn with; a user report has no known
         # inclusion probability and must carry NULL, so the estimator skips it until a human
         # reviews it under a known design (premortem H8, H9).
@@ -2369,9 +2404,13 @@ class ReviewQueue(Base):
 ```python
 class Feedback(Base):
     __tablename__ = "feedback"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    request_id: Mapped[str] = mapped_column(String(36), index=True)
-    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    request_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("predictions.request_id"), index=True
+    )
+    ts: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
     source: Mapped[str] = mapped_column(String(16))
     reviewer_id: Mapped[str | None] = mapped_column(String(64))
     agreement: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
@@ -2385,6 +2424,9 @@ class Feedback(Base):
         ),
     )
 ```
+   `text` joins the `sqlalchemy` import list. The BigInteger key, the foreign key and the
+   `ts` index are Task 10's and are kept: Phase 3 adds columns, it does not ask for
+   referential integrity to be dropped.
 
 4. **The entry point.** Rename `init_schema` to `init_db` and keep a one-line alias so no already-written call site in this phase breaks:
 ```python
@@ -2406,7 +2448,7 @@ Expected: the appended 7 PASS, and Task 10's own suite green after the rename.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/db.py tests/integration/test_db_schema.py
+git add backend/db.py backend/audit.py tests/integration/test_db_schema.py tests/unit/test_audit.py
 git commit -m "Reconcile the ORM with the schema Phase 3 consumes: sample_rate, user-report, init_db"
 ```
 
@@ -2455,7 +2497,7 @@ def pending(request_id="r1") -> PendingWrite:
         review=ReviewIntent(
             request_id=request_id,
             source="flagged",
-            inclusion_probability=1.0,
+            sample_rate=1.0,
             input_text_snapshot="you are an idiot",
         ),
     )
@@ -2768,8 +2810,15 @@ pytestmark = pytest.mark.integration
 
 def test_spooled_rows_reach_postgres_when_it_recovers(engine, session, tmp_path):
     spool = Spool(tmp_path / "s.jsonl", max_rows=10)
-    persist_prediction(
-        factory_for(FakeSession(fail=True)), spool, pending("r1"), t0=time.perf_counter()
+    # t0 is placed 31 ms in the past so the request-time measurement is distinguishable from
+    # anything a drain-time stamp could produce: a drain that re-measured would store ~0.
+    # The 31 on `pending()` is a placeholder the live path is SUPPOSED to overwrite, so it
+    # cannot be the expected value here (premortem H28, design decision D5).
+    result = persist_prediction(
+        factory_for(FakeSession(fail=True)),
+        spool,
+        pending("r1"),
+        t0=time.perf_counter() - 0.031,
     )
     assert spool.depth() == 1
 
@@ -2780,7 +2829,9 @@ def test_spooled_rows_reach_postgres_when_it_recovers(engine, session, tmp_path)
     stored = session.scalars(select(Prediction)).all()
     assert len(stored) == 1
     assert stored[0].persist_status == "spooled"
-    assert stored[0].latency_ms == 31          # the value measured at request time, not now
+    # The value measured at request time and reported to the client, not the drain time.
+    assert stored[0].latency_ms >= 31
+    assert stored[0].latency_ms == result.latency_ms
     assert session.get(ReviewQueue, "r1") is not None
 
 
@@ -3329,7 +3380,7 @@ def test_a_reviewable_prediction_enqueues_a_flagged_review_row(client, session, 
     assert body["decision"] == "review"
     queued = session.get(ReviewQueue, body["request_id"])
     assert queued.source == "flagged"
-    assert queued.inclusion_probability == 1.0
+    assert queued.sample_rate == 1.0
     assert queued.input_text_snapshot == "you are an idiot"
     assert queued.status == "pending"
 
@@ -3340,7 +3391,7 @@ def test_an_allowed_prediction_does_not_enqueue_when_the_audit_rate_is_zero(clie
         assert session.get(ReviewQueue, body["request_id"]) is None
 
 
-def test_random_audit_enqueues_with_its_inclusion_probability(client, session, monkeypatch):
+def test_random_audit_enqueues_with_its_sample_rate(client, session, monkeypatch):
     """H8. The weight has to be on the row, or Phase 3 cannot correct the pooled estimate."""
     from dataclasses import replace
 
@@ -3349,7 +3400,7 @@ def test_random_audit_enqueues_with_its_inclusion_probability(client, session, m
     body = client.post("/predict", json={"text": "have a nice day friend"}, headers=AUTH).json()
     queued = session.get(ReviewQueue, body["request_id"])
     assert queued.source == "random-audit"
-    assert queued.inclusion_probability == pytest.approx(0.05)
+    assert queued.sample_rate == pytest.approx(0.05)
 
 
 def test_request_ids_are_unique_per_request(client):
@@ -3412,7 +3463,7 @@ from sqlalchemy import text as sql_text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
-from backend.audit import FLAGGED_INCLUSION_PROBABILITY, should_random_audit
+from backend.audit import FLAGGED_SAMPLE_RATE, should_random_audit
 from backend.auth import API_KEY_HEADER, check_api_key, client_fingerprint
 from backend.config import Settings, load_settings
 from backend.db import PendingWrite, PredictionRow, ReviewIntent, init_schema, make_engine
@@ -3517,14 +3568,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             review = ReviewIntent(
                 request_id=request_id,
                 source="flagged",
-                inclusion_probability=FLAGGED_INCLUSION_PROBABILITY,
+                sample_rate=FLAGGED_SAMPLE_RATE,
                 input_text_snapshot=payload.text,
             )
         elif should_random_audit(state.settings.random_audit_rate, state.rng):
             review = ReviewIntent(
                 request_id=request_id,
                 source="random-audit",
-                inclusion_probability=state.settings.random_audit_rate,
+                sample_rate=state.settings.random_audit_rate,
                 input_text_snapshot=payload.text,
             )
 
@@ -4090,7 +4141,7 @@ def seed(session, request_id, *, predicted_days_ago, enqueued_days_ago=None, sta
             ReviewIntent(
                 request_id=request_id,
                 source="flagged",
-                inclusion_probability=1.0,
+                sample_rate=1.0,
                 input_text_snapshot="you are an idiot",
                 enqueued_ts=NOW - dt.timedelta(days=enqueued_days_ago),
             ),
@@ -4625,7 +4676,7 @@ def load_from_settings(settings: "Settings") -> LoadedModel: ...
 
 # backend/db.py  (Phase 2 defines; Phase 3 consumes)
 @dataclass(frozen=True) class PredictionRow: ...     # includes status, persist_status, ts
-@dataclass(frozen=True) class ReviewIntent: ...      # source, inclusion_probability, snapshot
+@dataclass(frozen=True) class ReviewIntent: ...      # source, sample_rate, snapshot
 @dataclass(frozen=True) class PendingWrite: prediction: PredictionRow; review: ReviewIntent | None
 def write_pending(session, pending: PendingWrite, stamp) -> int: ...   # returns latency_ms
 def insert_prediction(session, row: PredictionRow) -> None: ...        # idempotent
