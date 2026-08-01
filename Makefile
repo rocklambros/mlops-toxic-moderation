@@ -19,11 +19,11 @@ check-py:
 	     echo "    make venv PY=\$$HOME/anaconda3/envs/py311/bin/python"; \
 	     echo ""; exit 1; }
 
-# The lock generator was the one install in this repository with no hash check: every lock
-# target ran `pip install --only-binary=:all: pip-tools==7.4.1`, pinned but unhashed, on the
-# box that holds the AWS SSO refresh token, the W&B key, the Kaggle token, and the RunPod key
-# at once (premortem C11). This target builds the bootstrap lock the other targets install
-# from. It is run by hand when pip-tools is upgraded, not on every `make`.
+# The lock generator was the one install in this repository with no hash check: five lock
+# targets each fetched pip-tools by version alone -- pinned, unhashed -- on the box that holds
+# the AWS SSO refresh token, the W&B key, the Kaggle token, and the RunPod key at once
+# (premortem C11). This target builds the bootstrap lock those targets now read. It is run by
+# hand when pip-tools is upgraded, not on every `make`.
 #
 # `pip download --only-binary=:all:` fetches wheels, which are zip archives pip does not
 # execute at download time; an sdist WOULD run setup.py for metadata, which is the hole this
@@ -62,7 +62,7 @@ lock-tools: check-py
 # the project. Wheels only, so nothing executes a setup.py on a box holding live keys.
 lock: check-py
 	$(PY) -m venv .venv-lock
-	.venv-lock/bin/pip install --only-binary=:all: pip-tools==7.4.1
+	.venv-lock/bin/pip install --require-hashes --only-binary=:all: -r requirements/pip-tools.txt
 	PIP_ONLY_BINARY=:all: .venv-lock/bin/pip-compile --generate-hashes --allow-unsafe \
 	  --output-file requirements/dev.lock requirements/dev.txt
 	rm -rf .venv-lock
@@ -90,7 +90,7 @@ fetch-data:
 # wheels-only so nothing executes a setup.py on a box holding live keys.
 serve-deps: check-py
 	$(PY) -m venv .venv-lock
-	.venv-lock/bin/pip install --only-binary=:all: pip-tools==7.4.1
+	.venv-lock/bin/pip install --require-hashes --only-binary=:all: -r requirements/pip-tools.txt
 	PIP_ONLY_BINARY=:all: .venv-lock/bin/pip-compile --generate-hashes \
 	  --output-file requirements/serve.txt requirements/serve.in
 	rm -rf .venv-lock
@@ -109,7 +109,7 @@ test-integration:
 # hash-checked, same posture as `lock` and `serve-deps`.
 ui-lock: check-py
 	$(PY) -m venv .venv-lock
-	.venv-lock/bin/pip install --only-binary=:all: pip-tools==7.4.1
+	.venv-lock/bin/pip install --require-hashes --only-binary=:all: -r requirements/pip-tools.txt
 	PIP_ONLY_BINARY=:all: .venv-lock/bin/pip-compile --generate-hashes \
 	  --output-file requirements/ui.txt requirements/ui.in
 	rm -rf .venv-lock
@@ -130,7 +130,7 @@ security-lock: check-py
 # database directly -- as `monitoring_ro`, a read-only role.
 monitor-lock: check-py
 	$(PY) -m venv .venv-lock
-	.venv-lock/bin/pip install --only-binary=:all: pip-tools==7.4.1
+	.venv-lock/bin/pip install --require-hashes --only-binary=:all: -r requirements/pip-tools.txt
 	PIP_ONLY_BINARY=:all: .venv-lock/bin/pip-compile --generate-hashes \
 	  --output-file requirements/monitor.txt requirements/monitor.in
 	rm -rf .venv-lock
@@ -139,7 +139,7 @@ monitor-lock: check-py
 # 3) removes onnxruntime and tokenizers from the project entirely.
 rescorer-lock: check-py
 	$(PY) -m venv .venv-lock
-	.venv-lock/bin/pip install --only-binary=:all: pip-tools==7.4.1
+	.venv-lock/bin/pip install --require-hashes --only-binary=:all: -r requirements/pip-tools.txt
 	PIP_ONLY_BINARY=:all: .venv-lock/bin/pip-compile --generate-hashes \
 	  --output-file requirements/rescorer.txt requirements/rescorer.in
 	rm -rf .venv-lock
