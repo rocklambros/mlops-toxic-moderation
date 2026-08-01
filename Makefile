@@ -75,6 +75,17 @@ ui-lock: check-py
 	  --output-file requirements/ui.txt requirements/ui.in
 	rm -rf .venv-lock
 
+.PHONY: rescorer-lock
+
+# The challenger re-scorer. Installed by nothing else, so cutting it (ordered cut list item
+# 3) removes onnxruntime and tokenizers from the project entirely.
+rescorer-lock: check-py
+	$(PY) -m venv .venv-lock
+	.venv-lock/bin/pip install --only-binary=:all: pip-tools==7.4.1
+	.venv-lock/bin/pip-compile --generate-hashes \
+	  --output-file requirements/rescorer.txt requirements/rescorer.in
+	rm -rf .venv-lock
+
 # -s so the measured percentiles reach the operator's terminal, not just the report file.
 loadtest:
 	PYTHONHASHSEED=0 $(BIN)/pytest -m perf -s

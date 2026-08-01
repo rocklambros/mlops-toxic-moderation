@@ -8,14 +8,17 @@ from pathlib import Path
 MAKEFILE = Path("Makefile")
 LOCK = Path("requirements/dev.lock")
 BASE = Path("requirements/base.txt")
-# Every per-surface lock: the development venv, the serving image, the two Streamlit
-# images. Discovered rather than listed, so a fifth surface cannot be added with an
-# unhashed lock and no test noticing.
+# Every per-surface lock: the serving image, the two Streamlit images, the monitoring
+# dashboard, the challenger re-scorer. Discovered rather than listed, so a sixth surface
+# cannot be added with an unhashed lock and no test noticing.
 SURFACE_LOCKS = sorted(
     path
     for path in Path("requirements").glob("*.txt")
     if path.name != "dev.txt" and "pip-compile" in path.read_text()
 )
+# Discovered the same way, and from the other direction: an input with no compiled lock is
+# a surface whose image installs something nobody hashed.
+SURFACE_INPUTS = sorted(Path("requirements").glob("*.in"))
 
 
 def test_every_base_requirement_is_pinned_exactly():
@@ -53,6 +56,18 @@ def test_every_per_surface_lock_is_fully_hashed():
         assert text.count("--hash=sha256:") >= len(pins), f"{path} has an unhashed pin"
 
 
+def test_every_requirement_input_has_a_compiled_lock_beside_it():
+    """The scan above discovers locks. This one discovers *inputs*, so a surface added with
+    a hand-written `requirements/<name>.txt` -- which is what Phase 3's plan said to do for
+    the re-scorer -- cannot slip past by simply not looking like a compiled lock. The image
+    would then run `pip install --require-hashes` against a file with no hashes in it."""
+    assert SURFACE_INPUTS, "the input scan found nothing, so it certifies nothing"
+    for source in SURFACE_INPUTS:
+        compiled = source.with_suffix(".txt")
+        assert compiled.is_file(), f"{source} has no compiled lock; add a `make` target"
+        assert compiled in SURFACE_LOCKS, f"{compiled} was not produced by pip-compile"
+
+
 def test_every_surface_requirement_input_is_pinned_exactly():
     for path in Path("requirements").glob("*.in"):
         for line in path.read_text().splitlines():
@@ -62,11 +77,18 @@ def test_every_surface_requirement_input_is_pinned_exactly():
             assert re.fullmatch(r"[A-Za-z0-9_.\-\[\]]+==[0-9][^\s]*", stripped), f"{path}: {line}"
 
 
-def test_the_ui_lock_is_regenerated_wheels_only_like_every_other_lock():
+def test_every_surface_lock_is_regenerated_wheels_only_and_on_a_release_interpreter():
+    """Discovered from the Makefile rather than named, for the same reason SURFACE_LOCKS is
+    discovered: a lock target added without `--only-binary=:all:` resolves the whole surface
+    on a box holding four live credentials, and an sdist runs its setup.py while doing it."""
     recipe = MAKEFILE.read_text()
-    assert re.search(r"^ui-lock:.*check-py", recipe, re.M), "no ui-lock target, or it is unguarded"
-    ui_recipe = recipe.split("ui-lock:", 1)[1]
-    assert "--only-binary=:all:" in ui_recipe.split("\n\n", 1)[0]
+    targets = re.findall(r"(?m)^([a-z0-9]+(?:-[a-z0-9]+)*-lock):(.*)$", recipe)
+    assert {name for name, _ in targets} >= {"ui-lock"}, targets
+    for name, dependencies in targets:
+        assert "check-py" in dependencies, f"{name} is not guarded by check-py"
+        body = recipe.split(f"\n{name}:", 1)[1].split("\n\n", 1)[0]
+        assert "--only-binary=:all:" in body, f"{name} may resolve a source distribution"
+        assert "--generate-hashes" in body, f"{name} produces an unhashed lock"
 
 
 def test_the_ui_surface_carries_no_database_driver():

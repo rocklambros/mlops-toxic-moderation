@@ -60,12 +60,21 @@ def test_no_gitignore_directory_pattern_can_match_a_nested_source_directory():
 def test_committed_test_fixtures_are_tracked():
     """`*.csv` is unanchored too, and it swallowed tests/fixtures/mini_jigsaw.csv -- the
     fixture the Phase 0 plan calls a committed source artifact. Every test that reads it
-    passed locally and would have failed on the first CI run."""
+    passed locally and would have failed on the first CI run.
+
+    `rglob`, not `glob`: the challenger contract's fixtures live one directory down, and a
+    top-level-only scan certified nothing about them. `.onnx` is in the suffix set because
+    `.gitignore` carries a blanket `*.onnx` for real model artifacts, which swallows a
+    32-byte digest fixture just as happily as a 268 MB export.
+    """
     tracked = _tracked()
     fixtures = {
         str(p.relative_to(REPO))
-        for p in (REPO / "tests" / "fixtures").glob("*")
-        if p.is_file() and p.suffix in {".csv", ".json", ".parquet"}
+        for p in (REPO / "tests" / "fixtures").rglob("*")
+        if p.is_file()
+        and "__pycache__" not in p.parts
+        and p.suffix in {".csv", ".json", ".parquet", ".onnx"}
     }
+    assert fixtures, "the fixture scan found nothing, so it certifies nothing"
     missing = sorted(fixtures - tracked)
     assert not missing, f"committed fixtures are not tracked: {missing}"
