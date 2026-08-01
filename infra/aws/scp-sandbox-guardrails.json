@@ -52,7 +52,20 @@
       "Action": [
         "ec2:ModifyInstanceAttribute"
       ],
-      "Resource": "arn:aws:ec2:*:*:instance/*"
+      "Resource": "arn:aws:ec2:*:*:instance/*",
+      "Condition": {
+        "Null": {
+          "ec2:InstanceType": "false"
+        },
+        "StringNotEquals": {
+          "ec2:InstanceType": [
+            "t4g.small",
+            "t4g.medium",
+            "t4g.large",
+            "c7g.xlarge"
+          ]
+        }
+      }
     },
     {
       "Sid": "DenyRdsCreateWithoutManagedMasterPassword",
@@ -105,24 +118,39 @@
       "Resource": "*"
     },
     {
-      "Sid": "DenyDetectiveControlTampering",
+      "Sid": "DenyDetectiveControlBlinding",
       "Effect": "Deny",
       "Action": [
         "cloudtrail:StopLogging",
-        "cloudtrail:DeleteTrail",
         "cloudtrail:UpdateTrail",
         "cloudtrail:PutEventSelectors",
         "cloudtrail:PutInsightSelectors",
-        "guardduty:DeleteDetector",
         "guardduty:UpdateDetector",
         "guardduty:DeleteMembers",
         "guardduty:DisassociateFromAdministratorAccount",
         "guardduty:DisassociateMembers",
-        "guardduty:DeletePublishingDestination",
         "guardduty:UpdatePublishingDestination",
         "guardduty:StopMonitoringMembers"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "DenyDetectiveControlDeletionExceptOrgTeardown",
+      "Effect": "Deny",
+      "Action": [
+        "cloudtrail:DeleteTrail",
+        "guardduty:DeleteDetector",
+        "guardduty:DeletePublishingDestination"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ArnNotLike": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+            "arn:aws:sts::*:assumed-role/OrganizationAccountAccessRole/*"
+          ]
+        }
+      }
     },
     {
       "Sid": "DenyTrailEvidenceDestruction",
@@ -137,7 +165,15 @@
       "Resource": [
         "arn:aws:s3:::rockcyber-mlops-toxic-cloudtrail-*",
         "arn:aws:s3:::rockcyber-mlops-toxic-cloudtrail-*/*"
-      ]
+      ],
+      "Condition": {
+        "ArnNotLike": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+            "arn:aws:sts::*:assumed-role/OrganizationAccountAccessRole/*"
+          ]
+        }
+      }
     },
     {
       "Sid": "DenyStaticCredentialCreation",
