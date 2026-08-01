@@ -3009,8 +3009,17 @@ def test_tokens_refill_at_the_configured_rate():
 
 
 def test_refill_is_capped_at_the_burst():
+    """The bucket must be drawn down BEFORE the clock jumps, or the assertion proves nothing.
+
+    A bucket is created holding a full burst, so advancing the clock before the first call
+    leaves `min(burst, tokens + elapsed * rate)` measuring `min(burst, burst + 0)`: the cap
+    could be deleted outright and the sequence would be unchanged. Spending one token first
+    makes the cap load-bearing -- uncapped, 3600 seconds of refill grants 3600 tokens and the
+    fourth call succeeds.
+    """
     clock = FakeClock()
     limiter = RateLimiter(per_minute=60, burst=3, clock=clock)
+    assert limiter.allow("k") is True
     clock.advance(3600.0)
     assert [limiter.allow("k") for _ in range(4)] == [True, True, True, False]
 
@@ -3082,7 +3091,7 @@ class RateLimiter:
         now = self._clock()
         with self._lock:
             if len(self._buckets) >= MAX_TRACKED_KEYS and key not in self._buckets:
-                self._evict(now)
+                self._evict()
             bucket = self._buckets.get(key)
             if bucket is None:
                 bucket = _Bucket(tokens=self.burst, updated=now)
@@ -3096,7 +3105,7 @@ class RateLimiter:
             bucket.tokens -= 1.0
             return True
 
-    def _evict(self, now: float) -> None:
+    def _evict(self) -> None:
         """Drop the least recently seen half. Full buckets are indistinguishable from absent
         ones, so evicting a full bucket grants nothing an attacker did not already have."""
         ordered = sorted(self._buckets.items(), key=lambda item: item[1].updated)
@@ -3156,6 +3165,14 @@ def test_a_prefix_of_the_key_is_rejected():
     assert check_api_key("s3cret", "s3cret-demo-key") is False
 
 
+def test_a_non_ascii_key_is_rejected_rather_than_crashing():
+    """`hmac.compare_digest` raises TypeError on a str holding a codepoint above U+00FF, and
+    Starlette decodes header bytes as latin-1, so an attacker can put one there for free. An
+    unhandled TypeError inside the gate middleware is a 500 with no rejection counted, which
+    turns the auth check into a cheap way to generate server errors."""
+    assert check_api_key("s3cret-demo-k中", "s3cret-demo-key") is False
+
+
 def test_comparison_is_constant_time():
     """A byte-by-byte `==` on a secret is a timing oracle. This asserts the implementation
     uses hmac.compare_digest rather than trying to measure nanoseconds in CI."""
@@ -3201,9 +3218,17 @@ API_KEY_HEADER = "X-API-Key"
 
 
 def check_api_key(presented: str | None, expected: str) -> bool:
+    """Constant-time comparison of the presented header value against the demo key.
+
+    Both sides are encoded first. `hmac.compare_digest` raises TypeError when a `str`
+    argument holds a codepoint above U+00FF, and header values are attacker-controlled, so
+    comparing the raw strings turns any non-Latin-1 key into an unhandled exception inside
+    the gate middleware -- a 500 with no rejection counted. On ASCII keys the encoded and
+    unencoded comparisons are identical, so this costs nothing.
+    """
     if not presented:
         return False
-    return hmac.compare_digest(presented, expected)
+    return hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
 
 
 def client_fingerprint(api_key: str) -> str:
@@ -3218,7 +3243,7 @@ def client_fingerprint(api_key: str) -> str:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `PYTHONHASHSEED=0 .venv/bin/pytest tests/unit/test_auth.py -v`
-Expected: 7 PASS
+Expected: 8 PASS
 
 - [ ] **Step 5: Commit**
 
@@ -3234,9 +3259,19 @@ git commit -m "Add constant-time demo API key check and client fingerprint"
 **Files:**
 - Create: `backend/app.py`, `tests/integration/test_predict_api.py`
 - Amend: `tests/integration/conftest.py` (add the app fixtures)
+- Modify: `requirements/dev.txt`, `requirements/dev.lock`
 - Test: `tests/integration/test_predict_api.py`
 
 **Interfaces produced:** `create_app`, `POST /predict`
+
+**Dependency:** `fastapi.testclient.TestClient` is an httpx client, and no task installs
+httpx — the Tech Stack line names it but Task 2 puts only `fastapi`, `uvicorn`, `sqlalchemy`
+and `psycopg` in `serve.in`, so without this the suite below cannot even be collected. Add
+`httpx==0.27.2` to `requirements/dev.txt`, never to `serve.in`: it is a test dependency and
+`serve.in` builds the production image. Re-lock with `make lock PY=<release 3.11>`;
+`pip-compile` prefers the pins already in `dev.lock`, so this adds `anyio`, `h11`, `httpcore`,
+`httpx` and `sniffio` and moves nothing — and the `anyio` and `h11` it picks match the pins
+`serve.txt` already carries. Install with the usual wheels-only, hash-checked line.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3298,15 +3333,32 @@ def client(app_settings, session):
 import re
 
 import pytest
-from sqlalchemy import select
 
 from backend.db import Prediction, ReviewQueue
+from backend.policy import DecisionResult
 from model.labels import LABELS
 from tests.integration.conftest import AUTH
 
 pytestmark = pytest.mark.integration
 
 HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
+def allow_decision(probs, thresholds):
+    """A deterministic stand-in for `decide` that returns a coherent `allow`.
+
+    The fixture estimator is fitted on eight rows, so which decision any given string draws
+    is an accident of that fit rather than a property under test. Two tests below are about
+    the enqueue branch the app takes GIVEN a decision, so the decision is pinned here instead
+    of hoped for -- the original plan text guarded one of them with
+    `if body["decision"] == "allow":`, and the fixture in fact decides `review` for that
+    string, so the assertion never ran.
+    """
+    return DecisionResult(
+        flags=dict.fromkeys(LABELS, False),
+        decision="allow",
+        max_prob=max(probs.values()),
+    )
 
 
 def test_predict_returns_a_contract_valid_response(client):
@@ -3367,13 +3419,15 @@ def test_no_response_ever_carries_the_artifact_digest(client, artifact_bundle):
 
 
 def test_a_reviewable_prediction_enqueues_a_flagged_review_row(client, session, monkeypatch):
+    # max_prob comes from the probabilities the response also carries. A literal (the plan
+    # originally said 0.8) is rejected by `PredictionResponse._max_prob_is_consistent`, so the
+    # test would have 500'd rather than exercising the enqueue branch.
     monkeypatch.setattr(
         "backend.app.decide",
-        lambda probs, thresholds: __import__("backend.policy", fromlist=["DecisionResult"])
-        .DecisionResult(
+        lambda probs, thresholds: DecisionResult(
             flags={label: label == "toxic" for label in LABELS},
             decision="review",
-            max_prob=0.8,
+            max_prob=max(probs.values()),
         ),
     )
     body = client.post("/predict", json={"text": "you are an idiot"}, headers=AUTH).json()
@@ -3385,16 +3439,23 @@ def test_a_reviewable_prediction_enqueues_a_flagged_review_row(client, session, 
     assert queued.status == "pending"
 
 
-def test_an_allowed_prediction_does_not_enqueue_when_the_audit_rate_is_zero(client, session):
+def test_an_allowed_prediction_does_not_enqueue_when_the_audit_rate_is_zero(
+    client, session, monkeypatch
+):
+    monkeypatch.setattr("backend.app.decide", allow_decision)
     body = client.post("/predict", json={"text": "have a nice day friend"}, headers=AUTH).json()
-    if body["decision"] == "allow":
-        assert session.get(ReviewQueue, body["request_id"]) is None
+    assert body["decision"] == "allow"
+    assert session.get(ReviewQueue, body["request_id"]) is None
 
 
 def test_random_audit_enqueues_with_its_sample_rate(client, session, monkeypatch):
     """H8. The weight has to be on the row, or Phase 3 cannot correct the pooled estimate."""
     from dataclasses import replace
 
+    # `should_random_audit` is only consulted when the decision is neither review nor block.
+    # The fixture decides `review` for this string, so without pinning the decision the row
+    # is enqueued as `flagged` and the test fails on a branch it never meant to take.
+    monkeypatch.setattr("backend.app.decide", allow_decision)
     monkeypatch.setattr("backend.app.should_random_audit", lambda rate, rng: True)
     client.app.state.settings = replace(client.app.state.settings, random_audit_rate=0.05)
     body = client.post("/predict", json={"text": "have a nice day friend"}, headers=AUTH).json()
@@ -3415,12 +3476,26 @@ def test_request_ids_are_unique_per_request(client):
 
 def test_severe_toxic_never_appears_without_toxic(client, monkeypatch):
     """H22, end to end. The policy enforces coherence; this asserts nothing downstream
-    reintroduces the incoherent pair."""
+    reintroduces the incoherent pair.
+
+    The thresholds are pinned so that severe_toxic clears its own threshold while toxic does
+    not clear the higher one. That is the only way to reach the incoherent pair once
+    probabilities are hierarchy-clamped, and it is realistic: Phase 1 tunes a threshold per
+    label, so `threshold[toxic] > threshold[severe_toxic]` is an ordinary outcome. The
+    plan originally used probs `toxic=0.02, severe_toxic=0.95` against uniform 0.5
+    thresholds; with the clamp that pair cannot flag severe_toxic at all, and without the
+    clamp `PredictionResponse` refuses it outright.
+    """
+    client.app.state.thresholds = {
+        **dict.fromkeys(LABELS, 0.5),
+        "toxic": 0.9,
+        "severe_toxic": 0.3,
+    }
     monkeypatch.setattr(
         "backend.app.probs_to_dict",
         lambda row: {
-            "toxic": 0.02,
-            "severe_toxic": 0.95,
+            "toxic": 0.50,
+            "severe_toxic": 0.40,
             "obscene": 0.01,
             "threat": 0.01,
             "insult": 0.01,
@@ -3430,6 +3505,26 @@ def test_severe_toxic_never_appears_without_toxic(client, monkeypatch):
     body = client.post("/predict", json={"text": "anything"}, headers=AUTH).json()
     assert body["labels"]["severe_toxic"]["flag"] is True
     assert body["labels"]["toxic"]["flag"] is True
+
+
+def test_a_severe_probability_above_toxic_is_clamped_rather_than_served(client, session):
+    """H22's probability half, and a live defect rather than a hypothetical one.
+
+    `OneVsRestClassifier` fits the six labels independently, so `severe_toxic > toxic` comes
+    out of the real estimator on ordinary input. `PredictionResponse` refuses that pair, so
+    without `enforce_hierarchy` on the serving path the endpoint answers 500 to a benign
+    comment. The clamp runs before `decide`, so the row, the flags and the response all carry
+    the same coherent numbers.
+    """
+    response = client.post(
+        "/predict", json={"text": "my home address is 221b baker street"}, headers=AUTH
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["labels"]["severe_toxic"]["prob"] <= body["labels"]["toxic"]["prob"]
+    stored = session.get(Prediction, body["request_id"])
+    assert stored.prob_severe_toxic <= stored.prob_toxic
+    assert stored.prob_severe_toxic == pytest.approx(body["labels"]["severe_toxic"]["prob"])
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -3466,7 +3561,7 @@ from sqlalchemy.orm import sessionmaker
 from backend.audit import FLAGGED_SAMPLE_RATE, should_random_audit
 from backend.auth import API_KEY_HEADER, check_api_key, client_fingerprint
 from backend.config import Settings, load_settings
-from backend.db import PendingWrite, PredictionRow, ReviewIntent, init_schema, make_engine
+from backend.db import PendingWrite, PredictionRow, ReviewIntent, init_db, make_engine
 from backend.model_loader import load_from_settings
 from backend.persistence import persist_prediction
 from backend.policy import decide, load_thresholds
@@ -3474,7 +3569,7 @@ from backend.preprocess import prepare_input
 from backend.ratelimit import RateLimiter
 from backend.schemas import PredictRequest
 from backend.spool import Spool, SpoolFull
-from model.contract import LabelScore, PredictionResponse, probs_to_dict
+from model.contract import LabelScore, PredictionResponse, enforce_hierarchy, probs_to_dict
 from model.labels import LABELS
 
 log = logging.getLogger("backend.request")
@@ -3489,7 +3584,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.session_factory = sessionmaker(
             bind=app.state.engine, expire_on_commit=False
         )
-        init_schema(app.state.engine)
+        init_db(app.state.engine)
         # Startup fails closed: a digest or allowlist violation must stop the container from
         # ever accepting traffic, not surface as a 500 on the first request.
         app.state.model = load_from_settings(settings)
@@ -3542,7 +3637,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         try:
             normalized = prepare_input(payload.text)
-            probs = probs_to_dict(model.predict_proba([normalized])[0])
+            # `enforce_hierarchy` runs here, once, before anything reads the numbers.
+            # OneVsRestClassifier fits the six labels independently, so severe_toxic > toxic
+            # comes out of the real estimator, and PredictionResponse refuses that pair -- so
+            # skipping the clamp is a 500 on ordinary input, not a theoretical incoherence.
+            # Clamping before `decide` keeps the flags, the row and the response consistent
+            # with each other (premortem H22).
+            probs = enforce_hierarchy(probs_to_dict(model.predict_proba([normalized])[0]))
             result = decide(probs, state.thresholds)
         except Exception as exc:  # noqa: BLE001 - every failure must leave a row behind
             failed = PredictionRow(
@@ -3667,12 +3768,19 @@ def _log(model, row: PredictionRow, outcome, started: float) -> None:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `PYTHONHASHSEED=0 .venv/bin/pytest tests/integration/test_predict_api.py tests/unit/test_probs_to_dict.py -v`
-Expected: 9 integration PASS plus 4 unit PASS. `test_backend_never_re_derives_the_label_zip` is now load-bearing: `backend/app.py` exists and must go through `probs_to_dict`.
+Expected: 10 integration PASS plus 4 unit PASS. `test_backend_never_re_derives_the_label_zip` is now load-bearing: `backend/app.py` exists and must go through `probs_to_dict`.
+
+Confirm the three controls bite before moving on, since all ten pass on the first run: drop
+`enforce_hierarchy` and `test_a_severe_probability_above_toxic_is_clamped_rather_than_served`
+must fail; drop `if flags["severe_toxic"]: flags["toxic"] = True` from `backend/policy.py`
+and `test_severe_toxic_never_appears_without_toxic` must fail; return `model.model_version`
+instead of `model.public_version` and both H14 tests must fail. Restore after each.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/app.py tests/integration/conftest.py tests/integration/test_predict_api.py
+git add backend/app.py tests/integration/conftest.py tests/integration/test_predict_api.py \
+        requirements/dev.txt requirements/dev.lock
 git commit -m "Serve /predict with contract-valid responses and complete prediction logging"
 ```
 
@@ -3716,7 +3824,6 @@ def test_predict_stays_available_when_the_database_is_down(client, engine, sessi
     """H30, the finding this phase exists to close. Under the original design this returns
     503, which hands an attacker an off switch: exhaust a db.t4g.micro's connections and
     moderation is down, not degraded, for as long as the pressure lasts."""
-    healthy = client.app.state.session_factory
     break_the_database(client)
 
     response = client.post("/predict", json={"text": "you are an idiot"}, headers=AUTH)
@@ -3724,8 +3831,12 @@ def test_predict_stays_available_when_the_database_is_down(client, engine, sessi
     assert response.json()["decision"] in {"allow", "review", "block"}
     assert client.app.state.spool.depth() == 1
 
-    client.app.state.session_factory = healthy
-    assert drain_spool(sessionmaker(bind=engine, expire_on_commit=False), client.app.state.spool) == 1
+    # The drainer is handed its own sessionmaker, so restoring the app's broken factory would
+    # be theatre; the client is function-scoped and is not used again after this point.
+    drained = drain_spool(
+        sessionmaker(bind=engine, expire_on_commit=False), client.app.state.spool
+    )
+    assert drained == 1
     stored = session.scalars(select(Prediction)).all()
     assert len(stored) == 1
     assert stored[0].persist_status == "spooled"
@@ -3879,7 +3990,9 @@ def test_rejected_requests_do_not_write_rows(client, session):
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `PYTHONHASHSEED=0 .venv/bin/pytest tests/integration/test_predict_failure_paths.py tests/integration/test_predict_abuse_controls.py -v -m integration`
-Expected: the abuse-control tests PASS immediately (Task 15 wired the gate) and the failure-path tests FAIL — `test_predict_stays_available_when_the_database_is_down` with `assert 503 == 200` if the persistence path was written the way delivery spec §10 described, and `test_failed_prediction_still_writes_a_row` with `assert 0 == 1` if the error path re-raises without persisting. If both pass on the first run, verify by reverting `_persist` to `raise HTTPException(503)` and confirming the failure, then restore.
+Expected: the abuse-control tests PASS immediately (Task 15 wired the gate) and the failure-path tests FAIL — `test_predict_stays_available_when_the_database_is_down` with `assert 503 == 200` if the persistence path was written the way delivery spec §10 described, and `test_failed_prediction_still_writes_a_row` with `assert 0 == 1` if the error path re-raises without persisting.
+
+All fifteen pass on the first run when Task 15 was implemented as written, which means Step 2 proves nothing until each control is knocked out and observed to fail. Five mutations, each restored afterwards, cover the five controls: make `_persist` always raise `SpoolFull` (delivery spec §10's 503-on-any-failure behaviour — four failure-path tests plus two abuse tests go red); drop the `_persist` + `_log` pair from the `except` branch so the error path re-raises without persisting (`test_failed_prediction_still_writes_a_row`); drop the `check_api_key` branch from `_gate` (three abuse tests); drop the limiter branch (two); drop the Content-Length branches (two).
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -3938,7 +4051,11 @@ def test_one_structured_line_per_request(client, caplog):
     assert lines[0]["persist_status"] == "direct"
     assert lines[0]["input_chars"] == 16
     assert lines[0]["latency_ms"] >= 0
-    assert lines[0]["handler_ms"] >= lines[0]["latency_ms"]
+    # `latency_ms` is an integer rounded to the nearest millisecond and `handler_ms` keeps a
+    # decimal, so the honest form of "the handler measured at least as much as persistence"
+    # allows for half a millisecond of rounding. Asserting it strictly is a coin flip on
+    # whichever side of .5 the persistence stamp landed.
+    assert lines[0]["handler_ms"] >= lines[0]["latency_ms"] - 0.5
 
 
 def test_the_log_carries_the_full_digest(client, caplog, artifact_bundle):
@@ -3956,6 +4073,7 @@ def test_the_log_never_carries_raw_user_text(client, caplog):
     with caplog.at_level(logging.INFO, logger="backend.request"):
         client.post("/predict", json={"text": secret}, headers=AUTH)
     rendered = json.dumps(emitted(caplog))
+    assert emitted(caplog), "the scan found no log lines to scan"
     assert secret not in rendered
     assert "221b" not in rendered
 
@@ -4044,11 +4162,12 @@ def test_health_reports_model_version_and_database_readiness(client):
     assert body["spool_depth"] == 0
 
 
-def test_health_never_fingerprints_the_model(client):
+def test_health_never_fingerprints_the_model(client, artifact_bundle):
     """H14. Delivery spec section 6.3 strips the digest here specifically so an attacker
     cannot confirm which artifact is deployed while crafting evasions."""
     response = client.get("/health")
     assert "sha256" not in response.text
+    assert artifact_bundle["digest"] not in response.text
     assert not HEX64.search(response.text)
 
 
@@ -4074,11 +4193,11 @@ def test_health_answers_200_even_while_degraded(client):
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `PYTHONHASHSEED=0 .venv/bin/pytest tests/integration/test_health.py -v -m integration`
-Expected: PASS if Task 15 shipped `/health` as written; otherwise FAIL with `KeyError: 'spool_depth'` or an assertion on `status`. Confirm `test_health_never_fingerprints_the_model` bites by temporarily returning `state.model.model_version` and observing the failure, then restoring `public_version`.
+Expected: PASS if Task 15 shipped `/health` as written; otherwise FAIL with `KeyError: 'spool_depth'` or an assertion on `status`. Confirm all four bite, each mutation restored afterwards: return `state.model.model_version` (two tests go red); delete the `select 1` probe so `database` is hard-coded `"ok"` (`test_health_answers_200_even_while_degraded`); delete the `app.state.rejected[kind] += 1` line from `_reject` (`test_health_exposes_the_rejection_counters`).
 
 - [ ] **Step 3: Write minimal implementation**
 
-`/health` in `backend/app.py` as written in Task 15. Record the deploy-gate contract in the Phase 5 handoff by adding this line to `README.md` under the endpoints section:
+`/health` in `backend/app.py` as written in Task 15. Record the deploy-gate contract in the Phase 5 handoff by adding this line to `README.md` under the endpoints section — which does not exist yet, so create the `## Endpoints` heading here and let Task 22 Step 4 add the runnable `/predict` example beneath it:
 
 ```markdown
 `GET /health` returns 200 with `{"status": "ok" | "degraded", "model_version", "database",
