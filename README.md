@@ -57,11 +57,14 @@ make data                       # deterministic split + the leakage firewall gat
 Bring the whole stack up locally, including Postgres:
 
 ```bash
-export DEMO_API_KEY=local-dev-key
-export REVIEWER_SHARED_SECRET=local-dev-secret
-export SUBMITTER_FP_KEY=local-dev-fp-key
+export DEMO_API_KEY="$(openssl rand -hex 16)"
+export REVIEWER_SHARED_SECRET="$(openssl rand -hex 16)"
+export SUBMITTER_FP_KEY="$(openssl rand -hex 16)"
 docker compose -f infra/docker-compose.yml up -d --build
 ```
+
+Generated rather than typed, and deliberately not printed here: a literal in a public README
+is a credential somebody pastes into something that is not a laptop.
 
 Every credential is an interpolated variable with no default, so a missing one fails the
 `up` rather than starting the reviewer console on a secret nobody chose.
