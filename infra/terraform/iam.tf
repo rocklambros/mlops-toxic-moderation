@@ -75,8 +75,7 @@ data "aws_iam_policy_document" "backend" {
   }
 
   # The one tier that writes to Postgres, and therefore the one tier that holds
-  # the RDS-managed master credential. The reviewer shared secret is not here:
-  # the reviewer UI runs on the frontend instance, not this one.
+  # the RDS-managed master credential.
   #
   # db_readonly is here for one reason and it is not that the backend uses it.
   # The database is private, there is no bastion, and the ONLY path that can run
@@ -92,6 +91,12 @@ data "aws_iam_policy_document" "backend" {
   # strictly weaker than the master credential on the line above (CONNECT, USAGE
   # and SELECT only). The monitoring tier still cannot read the master secret,
   # which is the direction of the H16 control that matters.
+  # The reviewer shared secret is HERE and not on the frontend tier, and that placement is
+  # the control rather than a detail. `backend/review_api.py::_reviewer` is what HMACs a
+  # session token against it; `frontend/reviewer.py` reads BACKEND_URL and DEMO_API_KEY and
+  # nothing else, which is exactly what infra/deploy/compose.frontend.yml says in its
+  # comment. Phase A2 granted it to the frontend instead -- a credential the internet-facing
+  # Streamlit tier never reads, held by the one tier H16's harm sentence is written about.
   statement {
     sid     = "SecretsBackendOnly"
     effect  = "Allow"
@@ -99,6 +104,9 @@ data "aws_iam_policy_document" "backend" {
     resources = [
       aws_secretsmanager_secret.wandb_api_key.arn,
       aws_secretsmanager_secret.db_readonly.arn,
+      aws_secretsmanager_secret.reviewer_shared_secret.arn,
+      aws_secretsmanager_secret.demo_api_key.arn,
+      aws_secretsmanager_secret.submitter_fp_key.arn,
       aws_db_instance.main.master_user_secret[0].secret_arn,
     ]
   }
@@ -158,13 +166,18 @@ data "aws_iam_policy_document" "frontend" {
     effect  = "Allow"
     actions = ["secretsmanager:GetSecretValue"]
     resources = [
-      # The reviewer shared secret and NOTHING ELSE. The RDS master credential was
-      # here in an earlier draft; combined with this tier's internet-facing exposure
-      # that was premortem H16's harm sentence verbatim -- "a Streamlit RCE on the
-      # internet-facing box yields ... master-user read/write on all three tables" --
-      # inside the file that claims to close it. The W&B key is absent for the same
-      # reason: this tier neither trains nor loads artifacts from W&B.
-      aws_secretsmanager_secret.reviewer_shared_secret.arn,
+      # The demo API key and NOTHING ELSE. Both Streamlit entry points on this host send it
+      # as X-API-Key on every backend call (frontend/ui.py, frontend/reviewer.py), and
+      # neither reads anything else that is secret.
+      #
+      # The RDS master credential was here in an earlier draft; combined with this tier's
+      # internet-facing exposure that was premortem H16's harm sentence verbatim -- "a
+      # Streamlit RCE on the internet-facing box yields ... master-user read/write on all
+      # three tables" -- inside the file that claims to close it. The W&B key is absent for
+      # the same reason: this tier neither trains nor loads artifacts from W&B. The reviewer
+      # shared secret moved to the backend tier in Phase 5: the tier that VERIFIES a
+      # credential is the tier that must hold it, and no code on this host reads it.
+      aws_secretsmanager_secret.demo_api_key.arn,
     ]
   }
 }
@@ -289,4 +302,67 @@ resource "aws_iam_role_policy" "monitoring_boot_marker" {
   name   = "${var.project}-monitoring-boot-marker"
   role   = aws_iam_role.monitoring.id
   policy = data.aws_iam_policy_document.boot_marker.json
+}
+
+# ---- the deploy payload and the artifact mirror --------------------------
+#
+# What SendCommand actually runs is `bash /opt/toxic/bootstrap.sh <sha> <component>`, and
+# the first thing that script does is pull s3://<deploy bucket>/deploy/<sha>/ onto the box.
+# Without this grant the whole deploy path is one AccessDenied, discovered inside an SSM
+# invocation on a host with no SSH.
+#
+# Scoped by PREFIX, not to the bucket. The same bucket holds db/, which is the graded
+# dashboard dataset dumped by `make aws-down`: an instance has no reason to read a database
+# dump and every reason not to be able to. The ListBucket condition is what makes that real
+# -- without it, `aws s3 ls s3://<bucket>/db/` succeeds and enumerates the dumps by name even
+# though GetObject on them is denied.
+#
+# One document, three attachments, because the three tiers need exactly the same two
+# prefixes: the payload they are told to install, and the digest-keyed mirror the model and
+# its two sidecar artifacts are fetched from.
+
+data "aws_iam_policy_document" "deploy_payload" {
+  statement {
+    sid    = "ReadDeployPayloadAndArtifactMirror"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:GetObjectVersion",
+    ]
+    resources = [
+      "${aws_s3_bucket.deploy.arn}/deploy/*",
+      "${aws_s3_bucket.deploy.arn}/artifacts/*",
+    ]
+  }
+
+  statement {
+    sid       = "ListOnlyTheTwoPrefixesTheDeployReads"
+    effect    = "Allow"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.deploy.arn]
+
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["deploy/*", "artifacts/*"]
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "backend_deploy_payload" {
+  name   = "${var.project}-backend-deploy-payload"
+  role   = aws_iam_role.backend.id
+  policy = data.aws_iam_policy_document.deploy_payload.json
+}
+
+resource "aws_iam_role_policy" "frontend_deploy_payload" {
+  name   = "${var.project}-frontend-deploy-payload"
+  role   = aws_iam_role.frontend.id
+  policy = data.aws_iam_policy_document.deploy_payload.json
+}
+
+resource "aws_iam_role_policy" "monitoring_deploy_payload" {
+  name   = "${var.project}-monitoring-deploy-payload"
+  role   = aws_iam_role.monitoring.id
+  policy = data.aws_iam_policy_document.deploy_payload.json
 }

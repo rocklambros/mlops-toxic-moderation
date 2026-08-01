@@ -546,6 +546,17 @@ genai-security-project completeness evaluator. The fields above cover its substa
 
 ## Artifact digest of record
 
+| Artifact | sha256 |
+|---|---|
+| `toxic-clf.skops` | `db678467907743fbce5d25ab8c9ad56cd0c89e053b46be81822dcb2095842454` |
+
+The table is keyed on the **filename**, and it is read that way rather than by position.
+`infra/deploy/instance/fetch_artifacts.sh` looks each artifact up by its own name, because
+"the first 64-hex string in this file" silently becomes the corpus digest, the split digest
+or the environment digest the moment section 9 is reordered — and the fetcher would then be
+verifying a value the serving loader never checks. It is also the key of the S3 mirror the
+deploy falls back to, so a row here is what makes an object findable at all.
+
 The serving backend refuses to load any artifact whose SHA-256 differs from this value, and
 refuses to start if the `MODEL_DIGEST` environment variable differs from it. This block is the
 provenance anchor: it lives in git rather than in the registry, so an attacker holding the
