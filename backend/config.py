@@ -38,6 +38,11 @@ class Settings:
     model_digest: str
     model_registry_version: int
     thresholds_path: Path
+    # Per-deploy key for the submitter fingerprint (backend/fingerprint.py). Not in
+    # REQUIRED: when it is absent the app mints a random per-process key instead, so the
+    # per-source quotas stay live and only lose their stability across restarts. Making it
+    # optional-and-silent would be the fail-open case; `create_app` logs a warning.
+    submitter_fp_key: str = field(default="", repr=False)
     artifact_name: str = "toxic-clf"
     max_body_bytes: int = 16384
     rate_limit_per_minute: int = 30
@@ -86,6 +91,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         model_digest=source["MODEL_DIGEST"],
         model_registry_version=integer("MODEL_REGISTRY_VERSION", 1),
         thresholds_path=Path(source["THRESHOLDS_PATH"]),
+        submitter_fp_key=source.get("SUBMITTER_FP_KEY", ""),
         artifact_name=source.get("ARTIFACT_NAME", "toxic-clf"),
         max_body_bytes=integer("MAX_BODY_BYTES", 16384),
         rate_limit_per_minute=integer("RATE_LIMIT_PER_MINUTE", 30),

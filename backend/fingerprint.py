@@ -26,6 +26,10 @@ import hashlib
 import hmac
 import re
 
+# One spelling of the header, shared by the serving gate that reads it and the UI client
+# that sets it. Two spellings would be a quota that silently stops binding.
+SESSION_FP_HEADER = "X-Session-Fp"
+
 # \A and \Z, not ^ and $: in Python `$` also matches immediately before a trailing newline,
 # so "deadbeefdeadbeef\n" and "deadbeefdeadbeef" would be two spellings of one bucket.
 _HEX16 = re.compile(r"\A[0-9a-f]{16}\Z")

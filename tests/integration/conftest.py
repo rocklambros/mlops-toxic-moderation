@@ -97,6 +97,7 @@ def app_settings(artifact_bundle, postgres_url, tmp_path):
             "MODEL_DIGEST": artifact_bundle["digest"],
             "MODEL_REGISTRY_VERSION": "3",
             "THRESHOLDS_PATH": str(artifact_bundle["thresholds"]),
+            "SUBMITTER_FP_KEY": "0" * 64,
             "SPOOL_PATH": str(tmp_path / "spool.jsonl"),
             "RATE_LIMIT_PER_MINUTE": "600",
             "RATE_LIMIT_BURST": "300",
