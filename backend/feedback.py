@@ -21,8 +21,6 @@ import datetime as dt
 import json
 from dataclasses import dataclass
 
-from sqlalchemy import text
-
 from model.labels import LABELS
 
 USER_VERDICTS: frozenset[str] = frozenset({"agree", "disagree"})
@@ -85,7 +83,15 @@ def insert_feedback(conn, record: FeedbackRecord, ts: dt.datetime | None = None)
     The NULL is cast rather than left untyped: psycopg sends a bare `None` with no type, and
     `COALESCE($1, now())` on an untyped parameter is a resolution Postgres is entitled to
     refuse.
+
+    SQLAlchemy is imported here rather than at module scope on purpose. The UI client
+    imports `USER_VERDICTS` from this module, and a module-level import would drag a
+    database driver into the import closure of both Streamlit containers -- which is the
+    thing H16 exists to prevent. Nothing that writes rows is reachable from the UI, and now
+    nothing that could is even loaded there.
     """
+    from sqlalchemy import text
+
     conn.execute(
         text(
             "INSERT INTO feedback (request_id, ts, source, reviewer_id, agreement, exact_match) "

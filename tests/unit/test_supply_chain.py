@@ -8,6 +8,14 @@ from pathlib import Path
 MAKEFILE = Path("Makefile")
 LOCK = Path("requirements/dev.lock")
 BASE = Path("requirements/base.txt")
+# Every per-surface lock: the development venv, the serving image, the two Streamlit
+# images. Discovered rather than listed, so a fifth surface cannot be added with an
+# unhashed lock and no test noticing.
+SURFACE_LOCKS = sorted(
+    path
+    for path in Path("requirements").glob("*.txt")
+    if path.name != "dev.txt" and "pip-compile" in path.read_text()
+)
 
 
 def test_every_base_requirement_is_pinned_exactly():
@@ -31,6 +39,42 @@ def test_lock_exists_and_every_pin_carries_a_hash():
     pins = re.findall(r"(?m)^[A-Za-z0-9_.\-]+==", text)
     assert pins, "the lock has no pinned distributions"
     assert text.count("--hash=sha256:") >= len(pins)
+
+
+def test_every_per_surface_lock_is_fully_hashed():
+    """serve.txt and ui.txt install into containers that hold the demo key and, for the
+    reviewer console, the write path to the graded metric. An unhashed pin there is the
+    same supply-chain hole as an unhashed pin in dev.lock."""
+    assert {path.name for path in SURFACE_LOCKS} >= {"serve.txt", "ui.txt"}, SURFACE_LOCKS
+    for path in SURFACE_LOCKS:
+        text = path.read_text()
+        pins = re.findall(r"(?m)^[A-Za-z0-9_.\-]+==", text)
+        assert pins, f"{path} has no pinned distributions"
+        assert text.count("--hash=sha256:") >= len(pins), f"{path} has an unhashed pin"
+
+
+def test_every_surface_requirement_input_is_pinned_exactly():
+    for path in Path("requirements").glob("*.in"):
+        for line in path.read_text().splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or stripped.startswith("-r "):
+                continue
+            assert re.fullmatch(r"[A-Za-z0-9_.\-\[\]]+==[0-9][^\s]*", stripped), f"{path}: {line}"
+
+
+def test_the_ui_lock_is_regenerated_wheels_only_like_every_other_lock():
+    recipe = MAKEFILE.read_text()
+    assert re.search(r"^ui-lock:.*check-py", recipe, re.M), "no ui-lock target, or it is unguarded"
+    ui_recipe = recipe.split("ui-lock:", 1)[1]
+    assert "--only-binary=:all:" in ui_recipe.split("\n\n", 1)[0]
+
+
+def test_the_ui_surface_carries_no_database_driver():
+    """H16: a Streamlit container that can import psycopg is one leaked DSN away from
+    writing the graded metric directly. It reaches Postgres only through the backend API."""
+    ui = Path("requirements/ui.txt").read_text()
+    for driver in ("psycopg", "sqlalchemy", "asyncpg", "pg8000"):
+        assert not re.search(rf"(?mi)^{driver}[=\[]", ui), f"{driver} is installed in the UI image"
 
 
 def test_makefile_refuses_a_prerelease_interpreter():

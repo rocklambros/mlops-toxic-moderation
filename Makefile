@@ -60,6 +60,21 @@ serve-deps: check-py
 test-integration:
 	PYTHONHASHSEED=0 $(BIN)/pytest -m integration
 
+.PHONY: ui-lock
+
+# The Streamlit surfaces resolve on their own, into their own hashed lock, and are NOT
+# installed into the development venv. Nothing in the test suite imports streamlit: the UI
+# modules import it inside the functions that draw, so the pure logic -- the label payload,
+# the challenger column, the client -- is unit-tested without a 200 MB dependency in the
+# unit CI job. `requirements/ui.txt` is what the two UI images install, wheels-only and
+# hash-checked, same posture as `lock` and `serve-deps`.
+ui-lock: check-py
+	$(PY) -m venv .venv-lock
+	.venv-lock/bin/pip install --only-binary=:all: pip-tools==7.4.1
+	.venv-lock/bin/pip-compile --generate-hashes \
+	  --output-file requirements/ui.txt requirements/ui.in
+	rm -rf .venv-lock
+
 # -s so the measured percentiles reach the operator's terminal, not just the report file.
 loadtest:
 	PYTHONHASHSEED=0 $(BIN)/pytest -m perf -s
