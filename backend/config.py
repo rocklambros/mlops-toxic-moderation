@@ -1,16 +1,22 @@
 """Environment-driven settings for the serving backend.
 
 Two rules this module enforces rather than documents. Secrets are `repr=False`, because a
-Settings object reaches every traceback. And MAX_INPUT_CHARS is a module literal with no
-Settings field and no environment key, because an abuse control that a deploy-time variable
-can widen is not a control (delivery spec section 6.3).
+Settings object reaches every traceback. And MAX_INPUT_CHARS has no Settings field and no
+environment key, because an abuse control that a deploy-time variable can widen is not a
+control (delivery spec section 6.3). It is re-exported from `model.normalize`, which owns
+the single definition, so it is un-tunable in one place rather than two.
 """
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-MAX_INPUT_CHARS: int = 4000
+# Single source of truth for the input cap; see Phase 0 Task 3. Re-exported here so serving
+# callers have one import, but defined once, in model/normalize.py, alongside the normalizer
+# that also enforces it. A cap with two definitions is a cap reported wrongly at least once.
+from model.normalize import MAX_INPUT_CHARS
+
+__all__ = ["MAX_INPUT_CHARS", "REQUIRED", "Settings", "load_settings"]
 
 REQUIRED = (
     "DATABASE_URL",

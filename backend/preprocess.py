@@ -1,17 +1,24 @@
 """Serving-path input preparation.
 
-Train/serve skew resolution (premortem H25). The serving normalizer IS
-`model.data.dedup.normalize` - the same function object, not a superset. Delivery spec
-section 6.2 described it as dedup's normalizer plus confusable/homoglyph folding, which
-cannot hold: folding only here means the model scores text it was never fitted on, and
-folding in `dedup` changes dedup's output, therefore `data_version`, therefore the locked
-test set - after Phase 1 registered models against it. The gap is closed by making the two
-identical. Residual cross-script and homoglyph evasion is a model-card limitation, and the
-review queue does not mitigate it because a successful evasion is never flagged.
+Train/serve skew resolution (premortem H25). The serving normalizer is
+`model.normalize.normalize_for_serving`: the FROZEN corpus normalizer plus confusable
+folding, combining-mark stripping, and the length cap. It is a strict superset applied
+AFTER the corpus normalizer, so `model/data/dedup.py` never imports it, dedup output
+never moves, `split_version` never moves, and the locked 15% test set stays locked.
+
+Folding at serving time maps an evasion ONTO the training distribution rather than away
+from it: `уou` becomes `you`, a token the model was fitted on. The residual skew is
+bounded to inputs containing confusables or combining marks, which is the population this
+exists to canonicalise.
+
+Named limitation for MODEL_CARD.md: combining marks are stripped, so `händbuch` serves as
+`handbuch` while the corpus keeps `händbuch`. Residual cross-script and paraphrase evasion
+remains a model-card limitation, and the review queue does not mitigate it because a
+successful evasion is never flagged.
 """
 
-from backend.config import MAX_INPUT_CHARS
-from model.data.dedup import normalize
+from model.normalize import MAX_INPUT_CHARS
+from model.normalize import normalize_for_serving as normalize
 
 __all__ = ["MAX_INPUT_CHARS", "normalize", "prepare_input"]
 
@@ -20,7 +27,9 @@ def prepare_input(text: str) -> str:
     """Normalize one comment for scoring. Raises on oversize input.
 
     The pydantic layer already rejects oversize text with 422; this is the second gate, for
-    internal callers such as the spool drainer and the Phase 3 re-scorer.
+    internal callers such as the spool drainer and the Phase 3 re-scorer. It raises BEFORE
+    calling `normalize`, so the serving normalizer's internal truncation is never reached on
+    this path and no oversize input is ever silently shortened.
     """
     if len(text) > MAX_INPUT_CHARS:
         raise ValueError(f"input exceeds {MAX_INPUT_CHARS} characters")

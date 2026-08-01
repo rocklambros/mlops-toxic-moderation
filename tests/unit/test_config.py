@@ -1,5 +1,6 @@
 import pytest
 
+import model.normalize as mnorm
 from backend.config import MAX_INPUT_CHARS, load_settings
 
 BASE_ENV = {
@@ -54,7 +55,7 @@ def test_input_cap_is_not_environment_tunable():
     """REG-6.3a: a control that a deploy-time environment variable can widen is not a control.
     The size cap is a literal, and no Settings field shadows it."""
     settings = load_settings({**BASE_ENV, "MAX_INPUT_CHARS": "1000000"})
-    assert MAX_INPUT_CHARS == 4000
+    assert MAX_INPUT_CHARS == mnorm.MAX_INPUT_CHARS == 5000
     assert not hasattr(settings, "max_input_chars")
 
 

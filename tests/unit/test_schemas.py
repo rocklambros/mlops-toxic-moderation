@@ -17,7 +17,7 @@ def test_text_at_the_cap_is_accepted():
 def test_oversize_text_is_rejected():
     """REG-6.3a. Jigsaw comments top out around 5k characters; a moderation endpoint that
     accepts a megabyte of text per request is free CPU for anyone who asks."""
-    with pytest.raises(ValidationError, match="at most 4000"):
+    with pytest.raises(ValidationError, match=f"at most {MAX_INPUT_CHARS}"):
         PredictRequest(text="a" * (MAX_INPUT_CHARS + 1))
 
 
