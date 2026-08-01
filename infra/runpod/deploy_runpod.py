@@ -46,6 +46,7 @@ import argparse
 import atexit
 import json
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -982,6 +983,15 @@ def _endpoint(pod: Pod) -> tuple[str, int]:
     return pod.public_ip, pod.ssh_port
 
 
+# Enough of a remote traceback to name the failing call, not just the interpreter frames that
+# lead to it. At 400 characters a Python traceback coming back over SSH is cut off inside
+# `runpy`, above every frame that carries the actual cause -- which is exactly what happened
+# when the ONNX export failed on 2026-08-01: the message ended mid-word at
+# `File "/workspace/model/export_onnx`, and diagnosing it needed another paid pod. Still
+# bounded, and still scrubbed, because these strings reach logs.
+_STDERR_KEEP = 4000
+
+
 def _run_local(cmd: list[str], *, timeout: float) -> str:
     """Run a local subprocess with no shell, raising a scrubbed error."""
     try:
@@ -992,7 +1002,7 @@ def _run_local(cmd: list[str], *, timeout: float) -> str:
         raise LaunchError(f"{cmd[0]} timed out after {timeout}s") from None
     except subprocess.CalledProcessError as exc:
         raise LaunchError(
-            scrub(f"{cmd[0]} failed (exit {exc.returncode}): {(exc.stderr or '')[:400]}")
+            scrub(f"{cmd[0]} failed (exit {exc.returncode}): {(exc.stderr or '')[-_STDERR_KEEP:]}")
         ) from None
     return result.stdout
 
@@ -1182,19 +1192,47 @@ def fetch_checkpoint(
     `.safetensors` file would turn a finished cross-validation into `CheckpointError` and
     report a successful multi-hour run as a failure. The check is exactly as strict as before
     on every path that produces torch weights.
+
+    The remote path is named plainly, never as `<remote_dir>/.`. `scp -r host:dir/. local`
+    makes the source announce a file literally named `.`, which the sink rejects with
+    `error: unexpected filename: .` -- and it does so *after* the workload has finished, so
+    the failure lands at the one moment when the pod is about to be destroyed and its disk
+    with it. That is not hypothetical: it cost a completed 85-minute cross-validation on
+    2026-08-01, which teardown then deleted. Copying the directory by name into a staging
+    parent and moving its contents into place is the form both the legacy SCP protocol and
+    the SFTP protocol that replaced it accept.
     """
     host, port = _endpoint(pod)
-    Path(local_dir).mkdir(parents=True, exist_ok=True)
-    _run_local(
-        [
-            "scp", *_ssh_opts(key_path), "-P", str(port), "-r",
-            f"root@{host}:{remote_dir}/.", str(local_dir),
-        ],
-        timeout=timeout,
-    )
+    local_dir = Path(local_dir)
+    local_dir.mkdir(parents=True, exist_ok=True)
+    staging = local_dir.parent / f".fetch-{pod.pod_id}"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+    try:
+        _run_local(
+            [
+                "scp", *_ssh_opts(key_path), "-P", str(port), "-r",
+                f"root@{host}:{remote_dir}", str(staging),
+            ],
+            timeout=timeout,
+        )
+        fetched = staging / Path(remote_dir).name
+        if not fetched.is_dir():
+            raise LaunchError(
+                f"scp reported success but {fetched} is not a directory; nothing came back "
+                f"from {remote_dir} on pod {pod.pod_id}"
+            )
+        for item in fetched.iterdir():
+            target = local_dir / item.name
+            if target.exists():
+                shutil.rmtree(target) if target.is_dir() else target.unlink()
+            shutil.move(str(item), str(target))
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     if require_safetensors:
-        assert_safetensors_checkpoint(Path(local_dir))
-    return Path(local_dir)
+        assert_safetensors_checkpoint(local_dir)
+    return local_dir
 
 
 def assert_safetensors_checkpoint(path: Path) -> None:
@@ -1294,6 +1332,7 @@ def run_finetune(
             key_path=ssh_key,
             timeout=max_hours * 3600,
         )
+        export_failure: Exception | None = None
         if spec.classical:
             # No torch weights exist to quantise, so there is nothing for ONNX to export; what
             # there is to rescue is the out-of-fold matrix, which lives in the cache directory.
@@ -1304,17 +1343,30 @@ def run_finetune(
                 timeout=600.0,
             )
         elif export_onnx:
-            run_remote(
-                pod,
-                f"cd {REMOTE_WORKDIR} && {spec.export_command()}",
-                key_path=ssh_key,
-                timeout=3600.0,
-            )
+            # A failed export must not cost the fine-tune. The weights are the expensive,
+            # unreproducible artifact -- 25 GPU-minutes and a W&B run -- while the ONNX
+            # export is derived from them and can be redone on any machine with torch, for
+            # free, as many times as it takes. Letting the exception propagate here put the
+            # two in the wrong order: on 2026-08-01 a completed 3-epoch DistilBERT was
+            # destroyed with its pod because `model.export_onnx` raised after training, and
+            # `fetch_checkpoint` is the statement immediately after this block.
+            try:
+                run_remote(
+                    pod,
+                    f"cd {REMOTE_WORKDIR} && {spec.export_command()}",
+                    key_path=ssh_key,
+                    timeout=3600.0,
+                )
+            except Exception as exc:  # noqa: BLE001 - re-raised below, after retrieval
+                export_failure = exc
+                print(f"ONNX EXPORT FAILED (weights are still being retrieved): {scrub(str(exc))}")
         # Retrieval happens inside the lease, always. The pod's disk dies with the pod, so a
         # checkpoint still on it at teardown time never existed.
         fetch_checkpoint(
             pod, output_path, key_path=ssh_key, require_safetensors=not spec.classical
         )
+    if export_failure is not None:
+        raise export_failure
     return Path(output_path)
 
 

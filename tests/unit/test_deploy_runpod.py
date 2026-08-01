@@ -32,6 +32,7 @@ from __future__ import annotations
 import inspect
 import json
 import shlex
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -963,3 +964,181 @@ def test_the_launcher_cli_creates_nothing_without_execute(
     assert code == 0
     assert created == [], "a plan-only run must not create a pod"
     assert "DRY RUN" in capsys.readouterr().out.upper()
+
+
+# ---------------------------------------------------------------------------
+# Retrieval -- the last thing that runs before the disk is destroyed
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_checkpoint_never_names_the_remote_as_a_dot_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REGRESSION. `scp -r host:dir/. local` makes the source announce a file literally
+    named `.`, and the sink rejects it with `error: unexpected filename: .`.
+
+    It is the worst possible place for a portability bug: retrieval runs after the workload
+    has finished and inside the lease, so the failure surfaces at the one moment the pod is
+    about to be destroyed. On 2026-08-01 it threw away a completed 85-minute
+    cross-validation -- the run had produced every artifact, and teardown deleted them.
+    """
+    pod = dep.Pod(
+        pod_id="p1",
+        name="toxic-finetune-a",
+        raw={"publicIp": "203.0.113.7", "portMappings": {"22": 22001},
+             "costPerHr": 0.44},
+    )
+    calls: list[list[str]] = []
+
+    def fake_run_local(cmd: list[str], *, timeout: float) -> str:
+        calls.append(cmd)
+        # Behave like a real scp: the directory lands under its own basename.
+        dest = Path(cmd[-1]) / Path(cmd[-2].split(":", 1)[1]).name
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "cv_metrics.json").write_text("{}")
+        (dest / "oof.npz").write_bytes(b"\x00")
+        return ""
+
+    monkeypatch.setattr(dep, "_run_local", fake_run_local)
+
+    out = dep.fetch_checkpoint(
+        pod, tmp_path / "classical-cv", key_path=Path("/dev/null"), require_safetensors=False
+    )
+
+    assert len(calls) == 1
+    remote = calls[0][-2]
+    assert not remote.endswith("/."), (
+        f"scp source {remote!r} uses the `dir/.` form that the sink rejects with "
+        "'unexpected filename: .'"
+    )
+    assert remote.endswith(dep.REMOTE_OUTPUT_DIR)
+    # The contents must end up in the requested directory, not in a nested one.
+    assert (out / "cv_metrics.json").is_file()
+    assert (out / "oof.npz").is_file()
+
+
+def test_fetch_checkpoint_leaves_no_staging_directory_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The staging parent is an implementation detail; a leftover `.fetch-<pod>` beside the
+    artifacts would be collected by the next thing that globs the directory."""
+    pod = dep.Pod(
+        pod_id="p1",
+        name="toxic-finetune-a",
+        raw={"publicIp": "203.0.113.7", "portMappings": {"22": 22001},
+             "costPerHr": 0.44},
+    )
+
+    def fake_run_local(cmd: list[str], *, timeout: float) -> str:
+        dest = Path(cmd[-1]) / Path(cmd[-2].split(":", 1)[1]).name
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "thresholds.json").write_text("{}")
+        return ""
+
+    monkeypatch.setattr(dep, "_run_local", fake_run_local)
+
+    out = dep.fetch_checkpoint(
+        pod, tmp_path / "classical-cv", key_path=Path("/dev/null"), require_safetensors=False
+    )
+
+    assert (out / "thresholds.json").is_file()
+    leftovers = [p.name for p in out.parent.iterdir() if p.name.startswith(".fetch-")]
+    assert not leftovers, f"staging directories left behind: {leftovers}"
+
+
+def test_fetch_checkpoint_reports_an_empty_pull_instead_of_succeeding_silently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A green exit code from scp that produced no directory means nothing came back. Saying
+    so is the difference between a caught failure and an empty artifacts directory nobody
+    looks at until the pod is gone."""
+    pod = dep.Pod(
+        pod_id="p1",
+        name="toxic-finetune-a",
+        raw={"publicIp": "203.0.113.7", "portMappings": {"22": 22001},
+             "costPerHr": 0.44},
+    )
+    monkeypatch.setattr(dep, "_run_local", lambda cmd, *, timeout: "")
+
+    with pytest.raises(dep.LaunchError, match="nothing came back"):
+        dep.fetch_checkpoint(
+            pod, tmp_path / "classical-cv", key_path=Path("/dev/null"),
+            require_safetensors=False,
+        )
+
+
+def test_a_failed_onnx_export_still_brings_the_weights_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REGRESSION. The fine-tune is 25 GPU-minutes and cannot be reproduced for free; the
+    ONNX export is derived from it and can be redone anywhere torch installs.
+
+    Letting the export's exception propagate ordered those two backwards, and on 2026-08-01
+    it destroyed a completed 3-epoch DistilBERT: `export_onnx` raised, `fetch_checkpoint`
+    was the next statement and never ran, and the lease then deleted the pod's disk.
+    """
+    calls: list[str] = []
+    fetched: list[Path] = []
+
+    monkeypatch.setattr(dep, "wait_for_bootstrap", lambda *a, **k: None)
+    monkeypatch.setattr(dep, "make_code_archive", lambda p: Path(p))
+    monkeypatch.setattr(dep, "deliver_code", lambda *a, **k: None)
+    monkeypatch.setattr(dep, "deliver_dataset", lambda *a, **k: None)
+    monkeypatch.setattr(dep, "_create_pod", lambda *a, **k: dict(READY_RAW))
+    monkeypatch.setattr(dep, "_get_pod", lambda *a, **k: dict(READY_RAW))
+    monkeypatch.setattr(dep, "wait_until_ready", lambda *a, **k: dict(READY_RAW))
+    monkeypatch.setattr(dep, "terminate_pod", lambda *a, **k: True)
+    monkeypatch.setattr(dep, "assert_no_survivors", lambda *a, **k: None)
+
+    def fake_run_remote(pod, command, **kwargs):
+        calls.append(command)
+        if "export_onnx" in command:
+            raise dep.LaunchError("ssh failed (exit 1): boom inside export_onnx")
+        return ""
+
+    def fake_fetch(pod, out, **kwargs):
+        fetched.append(Path(out))
+        return Path(out)
+
+    monkeypatch.setattr(dep, "run_remote", fake_run_remote)
+    monkeypatch.setattr(dep, "fetch_checkpoint", fake_fetch)
+
+    key = tmp_path / "id_ed25519"
+    key.write_text("x")
+    (tmp_path / "id_ed25519.pub").write_text("ssh-ed25519 AAAA test")
+
+    with pytest.raises(dep.LaunchError, match="boom inside export_onnx"):
+        dep.run_finetune(
+            run_name="distilbert",
+            dataset_path=tmp_path / "bundle",
+            output_path=tmp_path / "artifacts" / "distilbert",
+            ssh_key=key,
+            registry_path=tmp_path / "runpod_pods.json",
+        )
+
+    assert any("export_onnx" in c for c in calls), "the export was never attempted"
+    assert fetched == [tmp_path / "artifacts" / "distilbert"], (
+        "the weights were not retrieved after the export failed; a failed export must not "
+        "cost the fine-tune"
+    )
+
+
+def test_a_remote_traceback_is_not_truncated_above_its_cause(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Python traceback arriving over SSH leads with `runpy` frames. Keeping only the first
+    few hundred characters therefore keeps exactly the part that carries no information, and
+    diagnosing the ONNX failure on 2026-08-01 needed a second paid pod purely because of it.
+    The tail is what names the cause."""
+    frames = "\n".join(f'  File "/workspace/frame{i}.py", line {i}' for i in range(120))
+    stderr = f"Traceback (most recent call last):\n{frames}\nValueError: the actual cause"
+
+    def boom(*_a, **_k):
+        raise subprocess.CalledProcessError(1, ["ssh"], output="", stderr=stderr)
+
+    monkeypatch.setattr(dep.subprocess, "run", boom)
+
+    with pytest.raises(dep.LaunchError) as excinfo:
+        dep._run_local(["ssh", "host", "cmd"], timeout=10.0)
+
+    assert "ValueError: the actual cause" in str(excinfo.value)
