@@ -338,6 +338,58 @@ def test_the_backend_roll_fetches_the_model_artifact(instance):
     assert f"dir={instance.root}/var/lib/toxic/artifacts" in calls
 
 
+def test_the_monitoring_component_fetches_its_artifacts(instance):
+    """EC2 #3 mounts /artifacts read-only and reads BASELINE_PATH from it. Nothing else
+    populated that directory, so the drift panel died on first boot -- fail-closed, with
+    BaselineMissingError, on the tier rubric 3.2 is graded on."""
+    instance.roll("monitoring")
+    calls = instance.log.read_text(encoding="utf-8")
+    fetches = [line for line in calls.splitlines() if line.startswith("fetch_artifacts ")]
+    assert fetches, "the monitoring roll never called the fetcher"
+    assert "thresholds.json" in fetches[0] and "baseline_flag_rates.json" in fetches[0]
+    assert "toxic-clf.skops" not in fetches[0], (
+        "the dashboard tier never scores anything; fetching the 382 MB model is egress and "
+        "disk for a file no container on this host opens"
+    )
+
+
+@pytest.mark.parametrize("component", ["backend", "monitoring"])
+def test_every_artifact_path_written_into_an_env_file_is_actually_fetched(instance, component):
+    """The general form of the bug: a path in an env file is a promise, and the only thing
+    that keeps it is a fetcher that was actually called with that filename.
+
+    Read from the RUN rather than from the source. The declared paths come out of the env
+    file this roll wrote, and the fetched names out of the arguments the fetcher was actually
+    given -- so a branch that writes the path and skips the fetch cannot pass.
+    """
+    instance.roll(component)
+    written = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (instance.root / "etc/toxic").iterdir()
+        if path.suffix == ".env"
+    )
+    declared = {Path(p).name for p in re.findall(r"=(/artifacts/[A-Za-z0-9_.-]+)", written)}
+    assert declared, f"the {component} env files name no artifact, so this asserts nothing"
+
+    calls = instance.log.read_text(encoding="utf-8")
+    fetches = [line for line in calls.splitlines() if line.startswith("fetch_artifacts ")]
+    assert fetches, f"the {component} roll never called the fetcher"
+    names = set()
+    for line in fetches:
+        asked = re.search(r"names=(.*?) dir=", line).group(1)
+        if asked == "<default>":
+            default = re.search(
+                r'ARTIFACT_NAMES="\$\{ARTIFACT_NAMES:-([^}]+)\}"',
+                (REPO / "infra/deploy/instance/fetch_artifacts.sh").read_text(encoding="utf-8"),
+            )
+            asked = default.group(1)
+        names |= set(asked.split())
+    assert declared <= names, (
+        f"the {component} env files reference artifacts nothing fetches: "
+        f"{sorted(declared - names)}"
+    )
+
+
 def test_the_reviewer_console_can_actually_authenticate(instance):
     """backend/review_api.py reads both, and `current_reviewer` returns None if either is
     empty -- so a backend missing them serves a review queue nobody can ever log in to."""

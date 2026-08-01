@@ -266,6 +266,20 @@ case "${COMPONENT}" in
     ;;
 
   monitoring)
+    # EC2 #3 mounts /var/lib/toxic/artifacts read-only and reads BASELINE_PATH and
+    # THRESHOLDS_PATH out of it. Nothing else on this host populates that directory, and
+    # monitoring/baseline.py is deliberately fail-closed -- so without this the drift panel
+    # raises BaselineMissingError on first boot and the graded dashboard is dead.
+    #
+    # The two sidecars only: this tier never scores anything, so the 382 MB model would be
+    # 382 MB of egress and disk for a file no container here opens.
+    WANDB_ARTIFACT="$(param "${PARAM_PREFIX}/model/wandb-artifact")" \
+      DEPLOY_BUCKET="${DEPLOY_BUCKET}" \
+      MODEL_CARD_PATH="${APP_DIR}/MODEL_CARD.md" \
+      ARTIFACT_DIR="${STATE_DIR}/artifacts" \
+      ARTIFACT_NAMES="thresholds.json baseline_flag_rates.json" \
+      bash "${APP_DIR}/fetch_artifacts.sh"
+
     {
       dsn "$(param "${PARAM_PREFIX}/db/readonly-secret-arn")" "${DB_ENDPOINT}" "${DB_NAME}" \
         | sed 's/^/MONITORING_DB_DSN=/'

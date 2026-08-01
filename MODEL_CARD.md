@@ -549,6 +549,29 @@ genai-security-project completeness evaluator. The fields above cover its substa
 | Artifact | sha256 |
 |---|---|
 | `toxic-clf.skops` | `db678467907743fbce5d25ab8c9ad56cd0c89e053b46be81822dcb2095842454` |
+| `thresholds.json` | `56d2e48834b676d03eadc4920330da73e6a6af8c13ffe306646a63bbcb8c6635` |
+| `baseline_flag_rates.json` | `fbd42f2ef2db72f44eb1efbfd64a1655ada5919405eab538e095c91829d04105` |
+
+Three artifacts, because two of them are as security-relevant as the coefficients.
+`thresholds.json` **is** the decision boundary — an unverified copy of it is a silent policy
+change that no metric would flag — and `baseline_flag_rates.json` is the reference the drift
+panel measures production against. Both are mounted read-only into a container that fails
+closed without them, so both are fetched and digest-verified exactly the way the model is.
+
+**`baseline_flag_rates.json` has not been produced.** Its row above is not a digest of a
+file: it is the SHA-256 of the sentence
+
+```
+PENDING PHASE 1 PROMOTION: baseline_flag_rates.json has not been produced
+```
+
+which no artifact can match — the same fail-closed sentinel this section carried for the
+model before Phase 1 promoted one. The monitoring instance's roll therefore stops with
+`digest mismatch on baseline_flag_rates.json` rather than starting a dashboard whose drift
+panel has nothing to drift from. Producing it needs the held-out probabilities in
+`artifacts/test_probabilities.npz` and `model.thresholds.compute_baseline_flag_rates`; it is
+**not** byte-reproducible (it stamps `generated_at_utc`), so the digest of record must be
+computed from the exact file that is uploaded, and this row replaced with it.
 
 The table is keyed on the **filename**, and it is read that way rather than by position.
 `infra/deploy/instance/fetch_artifacts.sh` looks each artifact up by its own name, because

@@ -31,6 +31,17 @@ GOOD = b"pretend skops artifact bytes"
 GOOD_SHA = hashlib.sha256(GOOD).hexdigest()
 EVIL = b"poisoned artifact bytes"
 
+# The two sidecars. thresholds.json IS the decision boundary and baseline_flag_rates.json is
+# the reference the drift panel measures against, so both get the same treatment as the
+# coefficients: fetched by name, verified against the committed card, installed only if every
+# one of the three verified.
+THRESHOLDS = b'{"toxic": 0.31, "severe_toxic": 0.05}'
+THRESHOLDS_SHA = hashlib.sha256(THRESHOLDS).hexdigest()
+BASELINE = b'{"schema_version": 1, "flag_rates": {}}'
+BASELINE_SHA = hashlib.sha256(BASELINE).hexdigest()
+TAMPERED_THRESHOLDS = b'{"toxic": 0.99, "severe_toxic": 0.99}'
+ALL_THREE = ("toxic-clf.skops", "thresholds.json", "baseline_flag_rates.json")
+
 
 # A 64-hex value that is NOT the artifact's, placed ahead of it in the fixture card. The
 # real MODEL_CARD.md carries several -- the raw corpus digest, the realized split digest, the
@@ -50,7 +61,9 @@ def workspace(tmp_path: Path) -> Path:
         f"| Realized split SHA-256 | `{DECOY_SHA}` |\n\n"
         "## Artifact digest of record\n\n"
         "| Artifact | sha256 |\n|---|---|\n"
-        f"| `toxic-clf.skops` | `{GOOD_SHA}` |\n",
+        f"| `toxic-clf.skops` | `{GOOD_SHA}` |\n"
+        f"| `thresholds.json` | `{THRESHOLDS_SHA}` |\n"
+        f"| `baseline_flag_rates.json` | `{BASELINE_SHA}` |\n",
         encoding="utf-8",
     )
     return tmp_path
@@ -88,7 +101,7 @@ def _env(workspace: Path) -> dict[str, str]:
     return {
         "MODEL_CARD_PATH": str(workspace / "MODEL_CARD.md"),
         "ARTIFACT_DIR": str(workspace / "artifacts"),
-        "ARTIFACT_NAME": "toxic-clf.skops",
+        "ARTIFACT_NAMES": "toxic-clf.skops",
         "WANDB_ARTIFACT": "rockcyber-org/wandb-registry-model/toxic-clf:production",
         "DEPLOY_BUCKET": "example-bucket",
     }
@@ -188,8 +201,11 @@ def test_the_expected_digest_cannot_be_supplied_by_the_environment(tmp_path, wor
     provenance. The card is the only source, so no environment variable may name a digest."""
     body = SCRIPT.read_text(encoding="utf-8")
     assert "MODEL_CARD_PATH" in body
-    reads = re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)[:}\-?]", body)
-    offenders = [name for name in reads if "DIGEST" in name.upper() or "SHA" in name.upper()]
+    # Only the environment-configurable forms -- `${X:-default}`, `${X:?required}`,
+    # `${X:=...}`. A bare `${digest}` is a local the script assigned itself two lines up, and
+    # flagging it would make the rule unsatisfiable by any script that names a digest at all.
+    configurable = re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*):[-?=]", body)
+    offenders = [n for n in configurable if "DIGEST" in n.upper() or "SHA" in n.upper()]
     assert not offenders, f"the environment can supply the expected digest through {offenders}"
 
 
@@ -206,7 +222,7 @@ def test_the_lookup_finds_a_digest_in_the_repositorys_own_model_card(tmp_path):
     env = {
         "MODEL_CARD_PATH": str(REPO / "MODEL_CARD.md"),
         "ARTIFACT_DIR": str(tmp_path / "artifacts"),
-        "ARTIFACT_NAME": "toxic-clf.skops",
+        "ARTIFACT_NAMES": "toxic-clf.skops",
         "WANDB_ARTIFACT": "rockcyber-org/wandb-registry-model/toxic-clf:production",
         "DEPLOY_BUCKET": "example-bucket",
     }
@@ -232,3 +248,137 @@ def test_an_environment_supplied_digest_is_not_honoured_even_if_someone_exports_
     result = run(SCRIPT, [], bin_dir, env=env)
     assert result.returncode != 0
     assert not (workspace / "artifacts" / "toxic-clf.skops").exists()
+
+
+# --- the two sidecars (gap DRIFT-ARTIFACTS) ------------------------------------------------
+
+
+def _wandb_stub_multi(model: bytes | None, thresholds: bytes | None,
+                      baseline: bytes | None) -> str:
+    """A `wandb` that drops whichever of the three artifacts the test says the registry has.
+
+    `None` for all three is an outage; `None` for one is the far more interesting case: a
+    registry that answers, successfully, with an incomplete artifact set.
+    """
+    if (model, thresholds, baseline) == (None, None, None):
+        return '#!/bin/bash\necho "wandb: 503 Service Unavailable" >&2\nexit 1\n'
+    lines = [
+        "#!/bin/bash",
+        'root=""',
+        'while [ $# -gt 0 ]; do if [ "$1" = "--root" ]; then root="$2"; fi; shift; done',
+        'mkdir -p "$root"',
+    ]
+    for name, payload in (("toxic-clf.skops", model), ("thresholds.json", thresholds),
+                          ("baseline_flag_rates.json", baseline)):
+        if payload is not None:
+            lines.append(f"printf '%s' {payload.decode()!r} > \"$root/{name}\"")
+    return "\n".join(lines) + "\n"
+
+
+def _env_all(workspace: Path) -> dict[str, str]:
+    """The DEFAULT artifact set, so the default itself is what the tests exercise."""
+    env = _env(workspace)
+    del env["ARTIFACT_NAMES"]
+    return env
+
+
+def test_the_fetcher_installs_thresholds_and_the_drift_baseline(tmp_path, workspace):
+    """The dashboard fails closed without baseline_flag_rates.json, and the backend fails
+    closed without thresholds.json. Both must land in ARTIFACT_DIR alongside the model."""
+    bin_dir = tmp_path / "bin"
+    make_stub(bin_dir, "wandb", _wandb_stub_multi(GOOD, THRESHOLDS, BASELINE))
+    make_stub(bin_dir, "aws", _aws_stub(None))
+    result = run(SCRIPT, [], bin_dir, env=_env_all(workspace))
+    assert result.returncode == 0, result.stdout + result.stderr
+    installed = {path.name for path in (workspace / "artifacts").iterdir()}
+    assert installed == set(ALL_THREE)
+    assert (workspace / "artifacts/thresholds.json").read_bytes() == THRESHOLDS
+    assert (workspace / "artifacts/baseline_flag_rates.json").read_bytes() == BASELINE
+
+
+def test_a_missing_sidecar_artifact_fails_the_fetch(tmp_path, workspace):
+    """Fail at fetch time on the instance, not at import time inside the container, where
+    the only symptom is a restart loop and a log line nobody is watching yet."""
+    bin_dir = tmp_path / "bin"
+    make_stub(bin_dir, "wandb", _wandb_stub_multi(GOOD, THRESHOLDS, None))
+    make_stub(bin_dir, "aws", _aws_stub(None))
+    result = run(SCRIPT, [], bin_dir, env=_env_all(workspace))
+    assert result.returncode != 0
+    assert "baseline_flag_rates.json" in result.stderr
+
+
+def test_a_sidecar_missing_from_the_registry_is_taken_from_the_mirror(tmp_path, workspace):
+    """The registry artifact carries the model and nothing else -- `log_model_artifact` calls
+    `artifact.add_file(model_path)` once -- so on the real system this is the ORDINARY path
+    for both sidecars, not an edge case."""
+    bin_dir = tmp_path / "bin"
+    log = tmp_path / "s3.log"
+    make_stub(bin_dir, "wandb", _wandb_stub_multi(GOOD, None, None))
+    make_stub(
+        bin_dir,
+        "aws",
+        "#!/bin/bash\n"
+        f'printf "%s\\n" "$*" >> {log}\n'
+        'dest="${@: -1}"\n'
+        'case "$dest" in\n'
+        f"  *thresholds.json) printf '%s' {THRESHOLDS.decode()!r} > \"$dest\" ;;\n"
+        f"  *baseline_flag_rates.json) printf '%s' {BASELINE.decode()!r} > \"$dest\" ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n",
+    )
+    result = run(SCRIPT, [], bin_dir, env=_env_all(workspace))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert {path.name for path in (workspace / "artifacts").iterdir()} == set(ALL_THREE)
+    requested = log.read_text(encoding="utf-8")
+    # Each sidecar is keyed by ITS OWN digest, not the model's.
+    assert f"artifacts/{THRESHOLDS_SHA}/thresholds.json" in requested, requested
+    assert f"artifacts/{BASELINE_SHA}/baseline_flag_rates.json" in requested, requested
+    assert f"artifacts/{GOOD_SHA}/toxic-clf.skops" not in requested, "the model came from S3"
+
+
+def test_sidecar_artifacts_are_digest_verified_against_the_model_card(tmp_path, workspace):
+    """Each name resolves to its OWN row. A lookup by position gives every artifact the
+    model's digest, and the two sidecars then fail to verify against bytes that are correct."""
+    body = SCRIPT.read_text(encoding="utf-8")
+    assert "ARTIFACT_NAMES" in body
+    assert "DIGEST_OF" in body or "SIDECAR_DIGESTS" in body
+
+
+def test_a_tampered_sidecar_is_refused_and_nothing_at_all_is_installed(tmp_path, workspace):
+    """thresholds.json IS the decision boundary: a swapped copy is a silent policy change
+    that no metric flags. And the model must not be installed either -- a half-updated
+    /artifacts is a backend scoring with this SHA's model at last SHA's thresholds."""
+    bin_dir = tmp_path / "bin"
+    make_stub(bin_dir, "wandb", _wandb_stub_multi(GOOD, TAMPERED_THRESHOLDS, BASELINE))
+    make_stub(bin_dir, "aws", _aws_stub(None))
+    result = run(SCRIPT, [], bin_dir, env=_env_all(workspace))
+    assert result.returncode != 0
+    assert "digest mismatch" in result.stderr
+    assert "thresholds.json" in result.stderr
+    assert not list((workspace / "artifacts").iterdir()), "a rejected set was partly installed"
+
+
+def test_a_named_artifact_with_no_row_in_the_card_fails_before_anything_is_fetched(
+    tmp_path, workspace
+):
+    bin_dir = tmp_path / "bin"
+    make_stub(bin_dir, "wandb", _wandb_stub_multi(GOOD, THRESHOLDS, BASELINE))
+    make_stub(bin_dir, "aws", _aws_stub(None))
+    env = _env_all(workspace)
+    env["ARTIFACT_NAMES"] = "toxic-clf.skops thresholds.json calibration.json"
+    result = run(SCRIPT, [], bin_dir, env=env)
+    assert result.returncode != 0
+    assert "calibration.json" in result.stderr
+    assert not list((workspace / "artifacts").iterdir())
+
+
+def test_the_default_artifact_set_matches_the_rows_the_repositorys_card_declares():
+    """The default list and the card are two halves of one contract. A name in one and not
+    the other is a fetch that fails closed on a healthy system, or a row nobody reads."""
+    default = re.search(r'ARTIFACT_NAMES="\$\{ARTIFACT_NAMES:-([^}]+)\}"',
+                        SCRIPT.read_text(encoding="utf-8"))
+    assert default, "the fetcher declares no default artifact set"
+    named = set(default.group(1).split())
+    card = (REPO / "MODEL_CARD.md").read_text(encoding="utf-8")
+    rows = set(re.findall(r"^\|\s*`([A-Za-z0-9_.-]+)`\s*\|\s*`[0-9a-f]{64}`\s*\|$", card, re.M))
+    assert named == rows, f"fetcher defaults {sorted(named)}, card declares {sorted(rows)}"
