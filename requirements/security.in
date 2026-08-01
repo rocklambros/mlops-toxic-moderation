@@ -11,11 +11,5 @@
 # compiled here does NOT install on an x86 runner: semgrep ships per-architecture wheels and
 # `--only-binary=:all:` records the hashes of the ones this platform can use.
 pip-audit==2.7.3
-semgrep==1.96.0
+semgrep==1.172.0
 
-# semgrep 1.96.0 imports `pkg_resources`, which setuptools REMOVED in v81. An unconstrained
-# resolve picks the newest setuptools and the scanner then dies at import with
-# `ModuleNotFoundError: No module named 'pkg_resources'` -- which is what happened on the
-# first CI run, where the sast job failed while passing locally on an older interpreter that
-# still had a compatible setuptools ambient in the venv.
-setuptools==80.10.2

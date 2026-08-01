@@ -116,25 +116,39 @@ def test_the_bootstrap_lock_carries_the_full_transitive_closure():
 
 def test_the_bootstrap_lock_pins_a_pip_the_lock_generator_can_actually_run_against():
     """`pip` is in pip-tools' own dependency closure, so `pip download pip-tools` fetches it
-    too. pip-tools 7.4.1 imports `pip._internal.utils.compat.stdlib_pkgs`, which pip 25
-    removed: an unconstrained `pip` here resolves to the newest release, the throwaway lock
-    venv installs it, and the very next `pip-compile` dies with an ImportError -- with every
-    hash in this file still perfectly valid. Hashes pin what installs, not whether it runs.
+    too, and the two have to be chosen as a pair. pip-tools 7.4.1 imported
+    `pip._internal.utils.compat.stdlib_pkgs`, which pip 25 removed: an unconstrained `pip`
+    resolved to the newest release, the throwaway lock venv installed it, and the very next
+    `pip-compile` died with an ImportError -- with every hash in this file still perfectly
+    valid. Hashes pin what installs, not whether it runs.
+
+    This originally asserted `pip major < 25`, which was a proxy for that pairing and went
+    stale the moment pip-tools was upgraded: 7.6.0 runs against pip 26 quite happily, and
+    holding pip below 25 then kept six advisories open to satisfy a constraint that no longer
+    existed. The invariant is the pairing, so that is what is asserted -- both versions
+    pinned, and the lock agreeing with the target that generates it, so neither can drift
+    alone. Bumping either means running `make lock-tools` and confirming `pip-compile` still
+    executes, which the target itself does.
     """
-    blocks = dict(requirement_blocks(BOOTSTRAP.read_text(encoding="utf-8")))
-    assert "pip" in blocks, (
-        "pip is part of the pip-tools closure; leaving it out of the bootstrap lock makes "
-        "`pip install --require-hashes` refuse the whole file"
-    )
-    match = PINNED_RE.match(blocks["pip"])
-    assert match is not None, blocks["pip"]
-    major = int(match.group("version").split(".")[0])
-    assert major < 25, (
-        f"the bootstrap lock pins pip {match.group('version')}; pip-tools 7.4.1 imports "
-        "pip._internal.utils.compat.stdlib_pkgs, which pip 25 removed. Regenerating without "
-        "the `pip==` constraint in `make lock-tools` produces a lock that installs cleanly "
-        "and then cannot compile anything"
-    )
+    text = BOOTSTRAP.read_text(encoding="utf-8")
+    blocks = dict(requirement_blocks(text))
+    versions = {}
+    for dependency in ("pip", "pip-tools"):
+        assert dependency in blocks, (
+            f"{dependency} is part of the bootstrap closure; leaving it out makes "
+            "`pip install --require-hashes` refuse the whole file"
+        )
+        match = PINNED_RE.match(blocks[dependency])
+        assert match is not None, blocks[dependency]
+        versions[dependency] = match.group("version")
+
+    recipe = Path("Makefile").read_text(encoding="utf-8")
+    for dependency, version in versions.items():
+        assert f"{dependency}=={version}" in recipe, (
+            f"the bootstrap lock pins {dependency}=={version}, which `make lock-tools` does "
+            "not name. The lock and the target that regenerates it have drifted, so the next "
+            f"regeneration silently changes {dependency}"
+        )
 
 
 def test_the_bootstrap_lock_is_regenerated_by_a_makefile_target_that_never_builds_an_sdist():
