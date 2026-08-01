@@ -6,6 +6,7 @@ assertions that follow then measure an empty table rather than the query under t
 """
 
 import datetime as dt
+import json
 from pathlib import Path
 
 import pytest
@@ -13,7 +14,16 @@ from sqlalchemy import text
 
 from model.labels import LABELS
 from monitoring.baseline import Baseline, load_thresholds
-from monitoring.queries import DriftRow, drift_report, flag_rate_series, latency_over_time
+from monitoring.queries import (
+    DriftRow,
+    drift_report,
+    flag_rate_series,
+    latency_over_time,
+    live_accuracy,
+    review_counts,
+    seeded_share,
+    user_feedback_panel,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -231,3 +241,197 @@ def test_flag_rate_series_on_an_empty_window_still_has_every_column(conn):
     frame = flag_rate_series(conn, since=NOW - dt.timedelta(days=14), thresholds=THRESHOLDS)
     assert len(frame) == 0
     assert list(frame.columns) == ["bucket", *LABELS]
+
+
+def _reviewed(conn, request_id, stratum, sample_rate, correct, ts=None):
+    ts = ts or NOW - dt.timedelta(days=1)
+    insert_prediction(conn, request_id, ts)
+    conn.execute(
+        text(
+            "INSERT INTO review_queue (request_id, enqueued_ts, status, source, sample_rate, "
+            "input_text_snapshot, reviewer_id, reviewed_ts) VALUES (:rid, :ts, 'reviewed', "
+            ":src, :rate, 'text', 'rock', :ts)"
+        ),
+        {"rid": request_id, "ts": ts, "src": stratum, "rate": sample_rate},
+    )
+    conn.execute(
+        text(
+            "INSERT INTO feedback (request_id, ts, source, reviewer_id, agreement, exact_match) "
+            "VALUES (:rid, :ts, 'reviewer', 'rock', CAST(:agree AS jsonb), :exact)"
+        ),
+        {
+            "rid": request_id,
+            "ts": ts,
+            "agree": json.dumps({label: correct for label in LABELS}),
+            "exact": correct,
+        },
+    )
+
+
+def test_live_accuracy_is_design_weighted_not_pooled(conn):
+    for i in range(200):
+        _reviewed(conn, f"fl{i}", "flagged", 1.0, correct=i < 120)
+    for i in range(20):
+        _reviewed(conn, f"ra{i}", "random-audit", 0.05, correct=i < 19)
+    conn.commit()
+
+    report = live_accuracy(conn, since=NOW - dt.timedelta(days=14))
+    assert report.n == 220
+    assert report.point == pytest.approx(0.83333, abs=1e-4)   # pooled would be 0.63182
+    assert {s.stratum for s in report.strata} == {"flagged", "random-audit"}
+    assert next(s for s in report.strata if s.stratum == "flagged").n == 200
+    assert report.lo < report.point < report.hi
+    # Kish's effective n, not the raw 220: 220 unequally-weighted observations do not carry
+    # the information of 220 independent ones, and an interval evaluated at the raw n would
+    # claim they do.
+    assert report.effective_n == pytest.approx(43.9024, abs=1e-3)
+    assert report.effective_n < report.n
+
+
+def test_two_audit_rates_are_two_design_cells_not_one_stratum(conn):
+    """RANDOM_AUDIT_RATE is deploy configuration and configuration changes. Rows drawn at
+    0.05 and rows drawn at 0.50 were drawn under different designs; folding them under one
+    name would weight half of them by a probability they were never drawn with."""
+    for i in range(10):
+        _reviewed(conn, f"fa{i}", "flagged", 1.0, correct=True)
+    _reviewed(conn, "lo1", "random-audit", 0.05, correct=True)
+    _reviewed(conn, "hi1", "random-audit", 0.50, correct=False)
+    conn.commit()
+
+    report = live_accuracy(conn, since=NOW - dt.timedelta(days=14))
+    assert len(report.strata) == 3, [s.stratum for s in report.strata]
+    rates = sorted(s.sample_rate for s in report.strata if s.stratum == "random-audit")
+    assert rates == [0.05, 0.5]
+    # 10*1 + 1*20 correct out of 10*1 + 1*20 + 1*2 total weight.
+    assert report.point == pytest.approx(30.0 / 32.0, abs=1e-6)
+
+
+def test_live_accuracy_respects_the_window(conn):
+    """The dashboard states a window in its caption. A row outside it that still moves the
+    number makes the caption a false statement about the metric beside it."""
+    for i in range(10):
+        _reviewed(conn, f"in{i}", "flagged", 1.0, correct=True)
+    for i in range(10):
+        _reviewed(conn, f"out{i}", "flagged", 1.0, correct=False,
+                  ts=NOW - dt.timedelta(days=40))
+    conn.commit()
+    report = live_accuracy(conn, since=NOW - dt.timedelta(days=14))
+    assert report.n == 10
+    assert report.point == pytest.approx(1.0)
+
+
+def test_live_accuracy_on_an_empty_table_is_none_not_a_zero_division(conn):
+    """C5: this is the panel that renders NaN or a traceback in the graded screenshot when
+    nothing has ever been reviewed."""
+    report = live_accuracy(conn, since=NOW - dt.timedelta(days=14))
+    assert report.n == 0
+    assert report.point is None
+    assert report.strata == []
+
+
+def test_user_feedback_cannot_move_the_graded_estimate(conn):
+    """H9 composed with H8: an anonymous write path must not be an anonymous write path
+    INTO THE GRADED METRIC."""
+    for i in range(200):
+        _reviewed(conn, f"fl{i}", "flagged", 1.0, correct=i < 120)
+    conn.commit()
+    before = live_accuracy(conn, since=NOW - dt.timedelta(days=14))
+
+    for i in range(200):
+        conn.execute(
+            text("INSERT INTO feedback (request_id, ts, source, agreement, exact_match) "
+                 "VALUES (:rid, :ts, 'user', '{}'::jsonb, false)"),
+            {"rid": f"fl{i}", "ts": NOW},
+        )
+    conn.commit()
+    after = live_accuracy(conn, since=NOW - dt.timedelta(days=14))
+    assert after.point == pytest.approx(before.point)
+    assert after.n == before.n
+
+
+def test_user_report_stratum_is_excluded_from_the_estimate(conn):
+    for i in range(10):
+        _reviewed(conn, f"fl{i}", "flagged", 1.0, correct=True)
+    insert_prediction(conn, "ur1", NOW - dt.timedelta(days=1))
+    conn.execute(
+        text(
+            "INSERT INTO review_queue (request_id, enqueued_ts, status, source, sample_rate, "
+            "input_text_snapshot, reviewer_id, reviewed_ts) VALUES ('ur1', :ts, 'reviewed', "
+            "'user-report', NULL, 'text', 'rock', :ts)"
+        ),
+        {"ts": NOW - dt.timedelta(days=1)},
+    )
+    conn.execute(
+        text(
+            "INSERT INTO feedback (request_id, ts, source, reviewer_id, agreement, exact_match) "
+            "VALUES ('ur1', :ts, 'reviewer', 'rock', CAST(:agree AS jsonb), false)"
+        ),
+        {"ts": NOW - dt.timedelta(days=1),
+         "agree": json.dumps({label: False for label in LABELS})},
+    )
+    conn.commit()
+    report = live_accuracy(conn, since=NOW - dt.timedelta(days=14))
+    assert report.n == 10
+    assert report.point == pytest.approx(1.0)
+
+
+def test_user_panel_reports_its_own_n_and_interval(conn):
+    for i in range(10):
+        insert_prediction(conn, f"u{i}", NOW - dt.timedelta(hours=1))
+        conn.execute(
+            text("INSERT INTO feedback (request_id, ts, source, agreement, exact_match) "
+                 "VALUES (:rid, :ts, 'user', '{}'::jsonb, :ok)"),
+            {"rid": f"u{i}", "ts": NOW, "ok": i < 8},
+        )
+    conn.commit()
+    panel = user_feedback_panel(conn, since=NOW - dt.timedelta(days=14))
+    assert panel.n == 10 and panel.agree == 8
+    assert panel.rate == pytest.approx(0.8)
+    assert panel.lo == pytest.approx(0.4901, abs=1e-3)
+    assert panel.hi == pytest.approx(0.9433, abs=1e-3)
+
+
+def test_the_user_panel_counts_no_reviewer_row(conn):
+    """The two sources share a table. A panel that counted both would report the reviewer's
+    work as public agreement, and the separation H9 asks for would exist only in the
+    caption."""
+    for i in range(10):
+        _reviewed(conn, f"rv{i}", "flagged", 1.0, correct=True)
+    conn.commit()
+    panel = user_feedback_panel(conn, since=NOW - dt.timedelta(days=14))
+    assert panel.n == 0 and panel.rate is None
+
+
+def test_user_panel_on_empty_data_is_none_not_nan(conn):
+    panel = user_feedback_panel(conn, since=NOW - dt.timedelta(days=14))
+    assert panel.n == 0 and panel.rate is None and panel.lo is None
+
+
+def test_review_counts_break_the_queue_down_by_status(conn):
+    """The footer caption names pending, rescored and reviewed. A count that collapsed them
+    would let an empty queue and a full one print the same line."""
+    _reviewed(conn, "done", "flagged", 1.0, correct=True)
+    insert_prediction(conn, "waiting", NOW - dt.timedelta(days=1))
+    conn.execute(
+        text(
+            "INSERT INTO review_queue (request_id, enqueued_ts, status, source, sample_rate, "
+            "input_text_snapshot) VALUES ('waiting', :ts, 'pending', 'flagged', 1.0, 'text')"
+        ),
+        {"ts": NOW - dt.timedelta(days=1)},
+    )
+    conn.commit()
+    counts = review_counts(conn, since=NOW - dt.timedelta(days=14))
+    assert counts == {"reviewed": 1, "pending": 1}
+    assert review_counts(conn, since=NOW + dt.timedelta(days=1)) == {}
+
+
+def test_seeded_share_separates_replayed_traffic_from_live_traffic(conn):
+    """The dashboard says out loud how much of its data is `make seed-demo` replay. A share
+    that always read zero would let a screenshot of seeded data look like production."""
+    for i in range(7):
+        insert_prediction(conn, f"seed{i}", NOW - dt.timedelta(days=1), is_seed=True)
+    for i in range(3):
+        insert_prediction(conn, f"live{i}", NOW - dt.timedelta(days=1), is_seed=False)
+    conn.commit()
+    assert seeded_share(conn, since=NOW - dt.timedelta(days=14)) == (10, 7)
+    assert seeded_share(conn, since=NOW + dt.timedelta(days=1)) == (0, 0)
