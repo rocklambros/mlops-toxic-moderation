@@ -30,7 +30,10 @@ def postgres_url():
         return
     from testcontainers.postgres import PostgresContainer
 
-    with PostgresContainer("postgres:16-alpine", driver="psycopg") as container:
+    with PostgresContainer(
+        "postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777",
+        driver="psycopg",
+    ) as container:
         yield container.get_connection_url()
 
 
