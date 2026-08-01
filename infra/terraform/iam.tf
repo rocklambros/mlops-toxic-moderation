@@ -248,3 +248,45 @@ resource "aws_iam_instance_profile" "monitoring" {
   name = "${var.project}-monitoring"
   role = aws_iam_role.monitoring.name
 }
+
+# ---- boot marker ---------------------------------------------------------
+#
+# The last line of user data writes /toxic/boot/<component>, which is the only
+# way to ask "did this instance's bootstrap reach the end?" from outside a host
+# that has no SSH. Because it is the last line of a `set -e` script, an
+# ungranted PutParameter turns every otherwise-successful boot into a FAILED
+# marker on the console -- so the grant and the script have to land together.
+#
+# Scoped to the /toxic/boot/ prefix and not to /toxic/*. The deploy pipeline's
+# record of which SHA is serving lives at /toxic/deploy/*, and an instance able
+# to rewrite that could lie about what it is running; /toxic/endpoints/* is what
+# the health gate reads. One statement, shared by the three tiers, because each
+# tier writes only its own component's key and a per-tier document would be
+# three copies of one sentence.
+
+data "aws_iam_policy_document" "boot_marker" {
+  statement {
+    sid       = "WriteOwnBootMarker"
+    effect    = "Allow"
+    actions   = ["ssm:PutParameter"]
+    resources = ["arn:aws:ssm:${var.region}:${local.account_id}:parameter/toxic/boot/*"]
+  }
+}
+
+resource "aws_iam_role_policy" "backend_boot_marker" {
+  name   = "${var.project}-backend-boot-marker"
+  role   = aws_iam_role.backend.id
+  policy = data.aws_iam_policy_document.boot_marker.json
+}
+
+resource "aws_iam_role_policy" "frontend_boot_marker" {
+  name   = "${var.project}-frontend-boot-marker"
+  role   = aws_iam_role.frontend.id
+  policy = data.aws_iam_policy_document.boot_marker.json
+}
+
+resource "aws_iam_role_policy" "monitoring_boot_marker" {
+  name   = "${var.project}-monitoring-boot-marker"
+  role   = aws_iam_role.monitoring.id
+  policy = data.aws_iam_policy_document.boot_marker.json
+}

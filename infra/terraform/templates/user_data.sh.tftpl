@@ -307,6 +307,62 @@ for attempt in 1 2 3 4 5; do
   sleep 10
 done
 
-console "TOXIC-USER-DATA-BOOTSTRAPPED component=$COMPONENT ecr_login=$ECR_LOGIN"
-printf 'component=%s ecr_login=%s\n' "$COMPONENT" "$ECR_LOGIN" >"$SENTINEL"
+# ---------------------------------------------------------------------------
+# 9. Externally observable success marker (premortem H26)
+#
+# "Externally observable" means observable from a laptop with the AWS CLI and
+# nothing else -- no SSH, no SSM session, no container. A boot that half
+# succeeded looks exactly like a boot that is still in progress, so the operator
+# needs one question with a yes-or-no answer that can be asked from outside.
+# Four channels, in the order they survive failure:
+#
+#   1. Serial console. Survives a dead SSM agent, which is the C6 failure mode:
+#        aws ec2 get-console-output --instance-id i-... --output text \
+#          | grep TOXIC-USER-DATA-
+#   2. Sentinel file, for an SSM Run Command check after the fact:
+#        test -f /var/lib/cloud/toxic-stack-bootstrapped
+#   3. CloudWatch Logs, stream "bootstrap" in this tier's own group:
+#        aws logs tail ${log_group} --since 30m
+#      Best effort: a logging permission problem must not fail a boot that
+#      otherwise succeeded, so both calls are non-fatal.
+#   4. SSM Parameter Store, and this one is the LAST LINE deliberately:
+#        aws ssm get-parameter --name /toxic/boot/<component>
+#      Everything above either succeeded or `set -e` already killed this script,
+#      so the presence of that parameter is the whole answer to "did the boot
+#      finish?". It is NOT written with `|| true`: aws_up.sh waits on it, and a
+#      marker that may be absent on a successful boot is a marker that cannot be
+#      waited on -- worse, a swallowed failure leaves the PREVIOUS boot's value
+#      in place and the wait returns immediately on a stale answer. If
+#      PutParameter is denied, the ERR trap says so on the console, which is
+#      exactly the diagnosis wanted. The grant is aws_iam_role_policy.boot_marker
+#      in iam.tf, scoped to /toxic/boot/*.
+#
+# The marker answers "user data finished", NOT "the application is up".
+# verify_deploy.sh answers the second question, and conflating the two would
+# hide which of them failed.
+#
+# Reading through IMDSv2 is also the live proof that http_tokens=required and
+# http_put_response_hop_limit=2 are working: this exact PUT-then-GET is what a
+# container does to obtain credentials, so a failure here surfaces on the
+# console now instead of as "Unable to locate credentials" three hours later.
+# ---------------------------------------------------------------------------
+IMDS_TOKEN="$(curl -fsS --retry 3 --retry-delay 2 --max-time 10 -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')"
+AMI_ID="$(curl -fsS --retry 3 --retry-delay 2 --max-time 10 -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" 'http://169.254.169.254/latest/meta-data/ami-id')"
+INSTANCE_ID="$(curl -fsS --retry 3 --retry-delay 2 --max-time 10 -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" 'http://169.254.169.254/latest/meta-data/instance-id')"
+BOOTED_AT="$(date -Is)"
+
+MARKER="TOXIC-USER-DATA-COMPLETE component=$COMPONENT instance=$INSTANCE_ID ami=$AMI_ID compose=$COMPOSE_VERSION ecr_login=$ECR_LOGIN at=$BOOTED_AT"
+
+printf '%s\n' "$MARKER" >"$SENTINEL"
 chmod 0644 "$SENTINEL"
+console "$MARKER"
+sync
+
+aws logs create-log-stream --region "$REGION" \
+  --log-group-name "$LOG_GROUP" --log-stream-name bootstrap >/dev/null 2>&1 || true
+aws logs put-log-events --region "$REGION" \
+  --log-group-name "$LOG_GROUP" --log-stream-name bootstrap \
+  --log-events "$(printf '[{"timestamp":%s000,"message":"%s"}]' "$(date +%s)" "$MARKER")" \
+  >/dev/null 2>&1 || true
+
+aws ssm put-parameter --region ${region} --name "/toxic/boot/${component}" --type String --overwrite --value "ok $BOOTED_AT $AMI_ID"

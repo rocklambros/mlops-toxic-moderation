@@ -6,6 +6,7 @@ from pathlib import Path
 TEMPLATE = Path("infra/terraform/templates/user_data.sh.tftpl")
 UNIT = Path("infra/deploy/toxic-stack.service")
 NETWORK = Path("infra/terraform/network.tf")
+IAM = Path("infra/terraform/iam.tf")
 
 
 def _body() -> str:
@@ -149,6 +150,46 @@ def test_the_public_subnets_auto_assign_an_address_so_the_wait_can_succeed():
         assert re.search(r"map_public_ip_on_launch\s*=\s*true", body), (
             f"{name} does not auto-assign a public IP; user data boots with no route"
         )
+
+
+def test_boot_marker_is_the_last_action():
+    """H26. A half-finished boot must not look like a slow one."""
+    body = _body()
+    assert "/toxic/boot/${component}" in body
+    meaningful = [line for line in _lines() if line and not line.startswith("#")]
+    assert "put-parameter" in meaningful[-1], f"the marker is not last: {meaningful[-1]}"
+
+
+def test_boot_marker_also_reaches_the_console_log():
+    """SSM PutParameter needs a working agent. The console log needs neither."""
+    assert "TOXIC-USER-DATA-COMPLETE" in _body()
+
+
+def test_boot_marker_carries_the_ami_id_so_a_replacement_is_visible():
+    body = _body()
+    assert "ami-id" in body, "record which AMI booted, so a forced replacement is detectable"
+
+
+def test_the_boot_marker_is_not_swallowed_when_it_fails():
+    """aws_up.sh waits on this parameter. A marker written with `|| true` is a marker that
+    reports success on a boot where PutParameter was denied, which is worse than no marker
+    at all: the wait returns on a stale value from the previous boot."""
+    marker_line = next(line for line in _lines() if "put-parameter" in line)
+    assert "|| true" not in marker_line
+    assert "|| :" not in marker_line
+
+
+def test_the_instance_role_may_write_the_boot_marker_and_nothing_else_in_the_namespace():
+    """The line above cannot succeed without this grant, and because it is the last line of
+    a `set -e` script an ungranted PutParameter turns every successful boot into a FAILED
+    marker. Scoped to the boot prefix: /toxic/deploy/* is the deploy pipeline's record of
+    which SHA is serving, and an instance that can rewrite it can lie about what it runs."""
+    source = IAM.read_text(encoding="utf-8")
+    assert "ssm:PutParameter" in source
+    assert "parameter/toxic/boot/*" in source
+    assert "parameter/toxic/*" not in source, "do not grant the whole namespace"
+    for role in ("backend", "frontend", "monitoring"):
+        assert re.search(rf'aws_iam_role\.{role}\.(id|name)', source), role
 
 
 def test_the_configuration_directory_is_not_world_readable():
