@@ -8,3 +8,8 @@ testcontainers[postgres]==4.8.2
 # suites cannot even be collected. Test-only, so it stays out of requirements/serve.in and
 # never reaches the production image.
 httpx==0.27.2
+# `tests/unit/test_severability.py` parses infra/docker-compose.yml as data. The alternative
+# -- asserting against the file as text -- would pass on a compose file that does not parse,
+# which is the one property `docker compose config` already checks. Test-only: no image
+# installs it, and nothing in the application reads YAML.
+PyYAML==6.0.2

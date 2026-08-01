@@ -75,7 +75,17 @@ ui-lock: check-py
 	  --output-file requirements/ui.txt requirements/ui.in
 	rm -rf .venv-lock
 
-.PHONY: rescorer-lock
+.PHONY: monitor-lock rescorer-lock
+
+# The monitoring dashboard's own surface. It carries a database driver, unlike the two
+# user-facing Streamlit images, because rubric 3.2 requires the dashboard to read the
+# database directly -- as `monitoring_ro`, a read-only role.
+monitor-lock: check-py
+	$(PY) -m venv .venv-lock
+	.venv-lock/bin/pip install --only-binary=:all: pip-tools==7.4.1
+	.venv-lock/bin/pip-compile --generate-hashes \
+	  --output-file requirements/monitor.txt requirements/monitor.in
+	rm -rf .venv-lock
 
 # The challenger re-scorer. Installed by nothing else, so cutting it (ordered cut list item
 # 3) removes onnxruntime and tokenizers from the project entirely.

@@ -137,6 +137,16 @@ def test_exit_criteria_accept_a_populated_dataset():
     assert check_exit_criteria(full) == []
 
 
+def test_the_seeder_and_the_dashboard_agree_on_the_daily_bucket_floor():
+    """Seven daily buckets is defined twice: once as the seeder's exit criterion and once as
+    the floor below which the dashboard's latency caption refuses to claim a trend. Raising
+    one alone lets `make seed-demo` certify a dataset that the panel it exists to populate
+    calls insufficient -- and both suites stay green while it happens."""
+    from monitoring.dashboard import MIN_BUCKETS as DASHBOARD_MIN_BUCKETS
+
+    assert MIN_BUCKETS == DASHBOARD_MIN_BUCKETS
+
+
 def test_seed_config_defaults_match_the_exit_criteria():
     config = SeedConfig()
     assert config.n >= 2000

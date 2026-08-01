@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1.10
+# Reviewer console. Streamlit, port 8503 -- deliberately not 8501.
+#
+# Identical to frontend/Dockerfile except the port and the entrypoint. It is a separate
+# image rather than one image with two commands because the two run on different ports with
+# different exposure classes: 8501 is carried by the demo ingress toggle and 8503 is carried
+# by no ingress rule at all (premortem H12, infra/exposure.py). One image with a runtime
+# switch makes "which one is exposed" a deploy-time argument instead of a build-time fact.
+FROM python:3.11-slim-bookworm@sha256:b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONPATH=/app
+
+RUN useradd --create-home --uid 10001 appuser
+
+WORKDIR /app
+
+COPY requirements/ui.txt requirements/
+RUN pip install --require-hashes --only-binary=:all: --no-deps -r requirements/ui.txt
+
+COPY model/ model/
+COPY backend/__init__.py backend/feedback.py backend/fingerprint.py backend/
+COPY infra/__init__.py infra/exposure.py infra/
+COPY frontend/ frontend/
+
+USER appuser
+EXPOSE 8503
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8503/_stcore/health').status == 200 else 1)"
+
+CMD ["streamlit", "run", "frontend/reviewer.py", "--server.port=8503", "--server.address=0.0.0.0", "--server.headless=true", "--browser.gatherUsageStats=false"]
