@@ -824,6 +824,30 @@ def test_the_export_command_is_one_the_onnx_exporter_parses() -> None:
     parser.parse_args(target[3:])
 
 
+def test_the_export_quantizes_per_channel_for_the_serving_architecture() -> None:
+    """Both defaults produced an artifact the parity gate refused on 2026-08-01: max |logit
+    delta| 2.72 against a 0.25 tolerance, worst on identity_hate at 2.72.
+
+    Per-TENSOR quantization gives one scale to a whole weight tensor, and attention
+    projections have a wide per-channel range, so outlier channels saturate. And
+    `default_quant_target()` reads the architecture of the exporting host -- an x86 pod --
+    while the fleet is `t4g`, which is ARM Graviton, so the default ships an AVX-512 VNNI
+    artifact to a Neoverse core.
+
+    Losing either flag reintroduces a failure that costs a full fine-tune to discover, since
+    the gate fires only after training completes.
+    """
+    _, target = _split_at_shim(dep.FinetuneSpec().export_command())
+    assert "--per-channel" in target, "per-tensor quantization fails the parity gate"
+    assert dep.SERVING_QUANT_TARGET == "arm64", "the serving fleet is t4g/Graviton"
+    assert f"--target {dep.SERVING_QUANT_TARGET}" in " ".join(target)
+
+    export_onnx = pytest.importorskip("model.export_onnx")
+    args = export_onnx.build_arg_parser().parse_args(target[3:])
+    assert args.per_channel is True
+    assert args.target == "arm64"
+
+
 def test_the_train_command_points_at_the_directory_the_bundle_is_delivered_to() -> None:
     """`deliver_dataset` scps a directory named `bundle` into the remote data dir, so the
     trainer's `--cache` has to name exactly that path. Drift here is a `BundleCacheError` on a

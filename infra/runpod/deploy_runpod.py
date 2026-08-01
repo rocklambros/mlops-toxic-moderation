@@ -182,6 +182,12 @@ REMOTE_DATA_DIR = f"{REMOTE_WORKDIR}/data"
 REMOTE_CACHE_DIR = f"{REMOTE_DATA_DIR}/bundle"
 REMOTE_OUTPUT_DIR = f"{REMOTE_WORKDIR}/outputs"
 REMOTE_ONNX_DIR = f"{REMOTE_OUTPUT_DIR}/onnx"
+
+# The int8 model is quantized for where it SERVES, not for where it is exported. The serving
+# fleet is `t4g`, which is ARM Graviton, while pods are x86 -- so letting the exporter read its
+# own architecture ships an AVX-512 VNNI artifact to a Neoverse core. Change this only when the
+# instance family changes.
+SERVING_QUANT_TARGET = "arm64"
 READY_SENTINEL = f"{REMOTE_WORKDIR}/.pod-bootstrap-complete"
 
 # The project code is not on the pod: `/data/` is gitignored and the pod has no clone. The
@@ -403,8 +409,23 @@ class FinetuneSpec:
         It runs here rather than on the Jetson for one reason and one reason only: the Jetson
         venv has no torch, so `torch_logits` -- the float half of the parity comparison --
         cannot be computed there. A parity test that cannot load the float model is not a
-        parity test. The int8 quantisation target is chosen from the pod's own architecture by
-        `default_quant_target`, so exporting on x86 and serving on x86 stay consistent.
+        parity test.
+
+        Two flags are pinned here rather than left to default, because both defaults produced
+        an artifact the parity gate refused on 2026-08-01 (max |logit delta| 2.72 against a
+        0.25 tolerance, worst on identity_hate):
+
+        ``--per-channel`` because the default is per-TENSOR dynamic quantization, which gives
+        one scale to a whole weight tensor. Attention projections have a wide per-channel
+        range, so outlier channels saturate and the logits move by whole units. Per-channel
+        weight scales are the standard remedy for transformers and cost nothing at inference.
+
+        ``--target arm64`` because ``default_quant_target()`` reads the architecture of the
+        machine it happens to be running on -- an x86 pod -- while the serving fleet is
+        ``t4g``, which is ARM Graviton. Quantizing for the host rather than the target is how
+        an artifact tuned for AVX-512 VNNI ends up on a Neoverse core. The target is a
+        configuration choice, not a property of the exporting host, so it is safe to pin it
+        here and it must match where the model actually runs.
         """
         model_dir = model_dir or f"{REMOTE_OUTPUT_DIR}/final"
         return " ".join(
@@ -419,6 +440,8 @@ class FinetuneSpec:
                 f"--cache {shlex.quote(cache_dir)}",
                 f"--fold {self.fold}",
                 f"--max-length {self.max_seq_length}",
+                "--per-channel",
+                f"--target {SERVING_QUANT_TARGET}",
             ]
         )
 
