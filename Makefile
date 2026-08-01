@@ -44,7 +44,7 @@ data:
 fetch-data:
 	./scripts/fetch_jigsaw.sh
 
-.PHONY: serve-deps test-integration serve purge
+.PHONY: serve-deps test-integration serve purge loadtest
 
 # Same supply-chain posture as `lock` and `venv`: pip-tools resolves in a throwaway venv so
 # the resolver never shares an environment with the project, and every install is
@@ -59,6 +59,10 @@ serve-deps: check-py
 
 test-integration:
 	PYTHONHASHSEED=0 $(BIN)/pytest -m integration
+
+# -s so the measured percentiles reach the operator's terminal, not just the report file.
+loadtest:
+	PYTHONHASHSEED=0 $(BIN)/pytest -m perf -s
 
 serve:
 	$(BIN)/uvicorn backend.app:create_app --factory --host 127.0.0.1 --port 8000
