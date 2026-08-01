@@ -250,3 +250,56 @@ def assert_feature_budget(
             f"{footprint.n_features} features); lower max_features"
         )
     return projected
+
+
+def compact_vocabularies(fitted: Pipeline) -> dict[str, int]:
+    """Convert every fitted vectoriser's ``vocabulary_`` values from numpy ints to Python ints.
+
+    Call this once after fitting and before serialising. It returns the number of terms
+    rewritten per vectoriser, so a caller can log that it did something.
+
+    Why it matters, measured rather than assumed. ``max_features`` is set on both vectorisers,
+    and sklearn's ``_limit_features`` reassigns ``vocabulary_`` values out of a numpy array, so
+    they come back as ``np.int64`` rather than ``int``. ``skops.io`` writes every numpy object
+    as its own archive member, which turns a 300,000-term vocabulary into 300,000 ``.npy``
+    entries. Worse, ``skops`` guards each write with ``if f_name not in
+    zip_file.namelist()``, and ``namelist()`` rebuilds the full list of entries on every call:
+    O(n^2), about 45 billion string comparisons at this size.
+
+    Measured on the promoted 200,000-word / 100,000-char model, not on a scaled proxy:
+
+    =========================  ===========  ===========
+    ..                         before       after
+    =========================  ===========  ===========
+    archive entries            300,190      190
+    serialise                  ~87 min      20.9 s
+    file size                  400.2 MB     321.4 MB
+    cold-start load            75.3 s       15.0 s
+    =========================  ===========  ===========
+
+    ``predict_proba`` output is bit-identical across the two artifacts (``atol=0``).
+
+    The cold-start number is the one that reaches production: ``backend/Dockerfile`` needs
+    ``HEALTHCHECK --start-period`` to exceed the load time, because uvicorn does not bind until
+    the lifespan finishes and every earlier probe is refused. 180s was chosen against a 75s
+    load and still holds comfortably against 15s.
+
+    Safe because sklearn uses these values only as column indices, and ``int`` and ``np.int64``
+    index identically. This changes the container, never the mapping.
+    """
+    rewritten: dict[str, int] = {}
+    for step in fitted.named_steps.values():
+        members = (
+            dict(step.transformer_list).items() if hasattr(step, "transformer_list") else ()
+        )
+        for name, vectorizer in members:
+            vocabulary = getattr(vectorizer, "vocabulary_", None)
+            if not vocabulary:
+                continue
+            before = sum(1 for value in vocabulary.values() if not isinstance(value, int))
+            if before:
+                vectorizer.vocabulary_ = {
+                    term: int(index) for term, index in vocabulary.items()
+                }
+            rewritten[name] = before
+    return rewritten
