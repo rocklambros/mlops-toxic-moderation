@@ -10,14 +10,26 @@
 # roles can write. An instance that could rewrite /toxic/deploy/current-sha could lie about
 # what it is running, and the rollback would believe it.
 #
-# usage: record_deploy.sh <git-sha>
+# usage: record_deploy.sh [--keep-previous] <git-sha>
+#
+# --keep-previous is what makes `rollback.sh` a recovery command rather than a toggle. Moving
+# current to previous is right when the new SHA is newer; on a rollback the SHA being replaced
+# is the one the operator is escaping, and recording it as the rollback target means a second
+# `make rollback` walks straight back into it.
 set -euo pipefail
 
-NEW_SHA="${1:?usage: record_deploy.sh <git-sha>}"
+KEEP_PREVIOUS=0
+if [ "${1:-}" = "--keep-previous" ]; then
+  KEEP_PREVIOUS=1
+  shift
+fi
+
+NEW_SHA="${1:?usage: record_deploy.sh [--keep-previous] <git-sha>}"
 # `${1:?}` fires on an unset argument but NOT on an empty one, and an empty string here is the
 # realistic failure: a workflow whose IMAGE_TAG expression did not resolve calls this with "".
 # Blanking the pointer after a green health gate is the worst possible moment to lose it.
-[ -n "${NEW_SHA}" ] || { printf 'usage: record_deploy.sh <git-sha> (got an empty sha)\n' >&2; exit 2; }
+[ -n "${NEW_SHA}" ] \
+  || { printf 'usage: record_deploy.sh [--keep-previous] <git-sha> (got an empty sha)\n' >&2; exit 2; }
 
 REGION="${AWS_REGION:-us-west-2}"
 PARAM_PREFIX="${TOXIC_PARAM_PREFIX:-/toxic}"
@@ -39,7 +51,8 @@ CURRENT="$(get "${PARAM_PREFIX}/deploy/current-sha")"
 # The `!=` guard is not an optimisation. Re-running a deploy of the SHA that is already
 # current would otherwise set previous == current, and the rollback would re-roll the version
 # it is trying to escape.
-if [ -n "${CURRENT}" ] && [ "${CURRENT}" != "None" ] && [ "${CURRENT}" != "${NEW_SHA}" ]; then
+if [ "${KEEP_PREVIOUS}" -eq 0 ] \
+   && [ -n "${CURRENT}" ] && [ "${CURRENT}" != "None" ] && [ "${CURRENT}" != "${NEW_SHA}" ]; then
   put "${PARAM_PREFIX}/deploy/previous-sha" "${CURRENT}"
   printf 'record_deploy: previous-sha=%s\n' "${CURRENT}"
 fi
