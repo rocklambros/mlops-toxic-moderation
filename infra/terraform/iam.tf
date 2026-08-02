@@ -355,6 +355,52 @@ resource "aws_iam_role_policy" "backend_deploy_payload" {
   policy = data.aws_iam_policy_document.deploy_payload.json
 }
 
+# ---- the database dump prefix, backend only ------------------------------
+#
+# premortem H6 and H29. `make aws-down` has `db-dump` as a hard prerequisite, so
+# every teardown path produces a restorable dump first -- and RDS is private with
+# no bastion, so the dump can only be taken from inside the VPC. The backend tier
+# is the only one with a 5432 route AND the master credential, so it is the only
+# tier that can take it, which makes this the grant the whole H6 remediation
+# rests on. Without it `pg_dump | aws s3 cp - s3://<bucket>/db/...` is an
+# AccessDenied inside an SSM invocation, `make aws-down` refuses to stop
+# anything, and the cost control is dead.
+#
+# The read is granted alongside the write for two reasons: `make db-restore`
+# streams the object back from this same host, and `db_dump.sh` reads the object
+# it just uploaded and makes pg_restore parse it, because `aws s3 cp -` uploads
+# whatever it received before a broken pipe and a truncated archive is not a
+# backup.
+#
+# ONE tier, and the omission is the control. The frontend is the internet-facing
+# Streamlit box H16's harm sentence is written about, and the monitoring tier
+# connects as the SELECT-only monitor_ro role; a full dump of the database in
+# either place would undo both. This grants the backend nothing it does not
+# already hold -- it has the master credential and can read every row directly --
+# which is exactly why it is the tier that gets it.
+#
+# No ListBucket: `aws s3 cp` to and from a known key does not need it, and
+# `aws s3 ls s3://<bucket>/db/` from an instance would enumerate every session's
+# dataset by name.
+
+data "aws_iam_policy_document" "database_dump" {
+  statement {
+    sid    = "ReadAndWriteTheDatabaseDumpPrefix"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+    ]
+    resources = ["${aws_s3_bucket.deploy.arn}/db/*"]
+  }
+}
+
+resource "aws_iam_role_policy" "backend_database_dump" {
+  name   = "${var.project}-backend-database-dump"
+  role   = aws_iam_role.backend.id
+  policy = data.aws_iam_policy_document.database_dump.json
+}
+
 resource "aws_iam_role_policy" "frontend_deploy_payload" {
   name   = "${var.project}-frontend-deploy-payload"
   role   = aws_iam_role.frontend.id
