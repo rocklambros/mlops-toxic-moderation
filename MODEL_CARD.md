@@ -9,7 +9,7 @@ rounding an estimate into a claim.
 
 | | |
 |---|---|
-| **Artifact digest** | `sha256:db678467907743fbce5d25ab8c9ad56cd0c89e053b46be81822dcb2095842454` |
+| **Artifact digest** | `sha256:63d96d6da37dd6da3915048f729ca52b1ede5152434e4d0279bdd6b767fba5e4` |
 | **Registry (public, logged-out)** | <https://wandb.ai/rockcyber-org/wandb-registry-model/artifacts/model/toxic-clf> |
 | **Promoted stage** | `production` (collection `toxic-clf`, version `v0`) |
 | **Training / evaluation run** | <https://wandb.ai/rockcyber/mlops-toxic-moderation/runs/dnvoc420> |
@@ -469,8 +469,8 @@ this corpus is the 180,633 training rows recorded in §6.
 | | |
 |---|---|
 | File | `toxic-clf.skops` |
-| SHA-256 | `db678467907743fbce5d25ab8c9ad56cd0c89e053b46be81822dcb2095842454` |
-| Size | 400,229,552 bytes |
+| SHA-256 | `63d96d6da37dd6da3915048f729ca52b1ede5152434e4d0279bdd6b767fba5e4` |
+| Size | 321,407,256 bytes |
 | Format | `skops` archive (zip container with `schema.json`), verified as such before upload |
 | Registry | `rockcyber-org/wandb-registry-model/toxic-clf:production` |
 
@@ -548,7 +548,7 @@ genai-security-project completeness evaluator. The fields above cover its substa
 
 | Artifact | sha256 |
 |---|---|
-| `toxic-clf.skops` | `db678467907743fbce5d25ab8c9ad56cd0c89e053b46be81822dcb2095842454` |
+| `toxic-clf.skops` | `63d96d6da37dd6da3915048f729ca52b1ede5152434e4d0279bdd6b767fba5e4` |
 | `thresholds.json` | `56d2e48834b676d03eadc4920330da73e6a6af8c13ffe306646a63bbcb8c6635` |
 | `baseline_flag_rates.json` | `fbd42f2ef2db72f44eb1efbfd64a1655ada5919405eab538e095c91829d04105` |
 
@@ -591,7 +591,7 @@ This value was **computed from the artifact in hand**, not transcribed from the 
 
 ```bash
 sha256sum artifacts/toxic-clf.skops | cut -d' ' -f1
-# db678467907743fbce5d25ab8c9ad56cd0c89e053b46be81822dcb2095842454
+# 63d96d6da37dd6da3915048f729ca52b1ede5152434e4d0279bdd6b767fba5e4
 ```
 
 A transcribed digest is a digest the registry supplied, which is exactly the co-location this
