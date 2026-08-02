@@ -550,7 +550,7 @@ genai-security-project completeness evaluator. The fields above cover its substa
 |---|---|
 | `toxic-clf.skops` | `63d96d6da37dd6da3915048f729ca52b1ede5152434e4d0279bdd6b767fba5e4` |
 | `thresholds.json` | `56d2e48834b676d03eadc4920330da73e6a6af8c13ffe306646a63bbcb8c6635` |
-| `baseline_flag_rates.json` | `fbd42f2ef2db72f44eb1efbfd64a1655ada5919405eab538e095c91829d04105` |
+| `baseline_flag_rates.json` | `af1b2ef4661b6cce902f500e290cb1b3aaa2d28d63c041261e46cea4be8caa5b` |
 
 Three artifacts, because two of them are as security-relevant as the coefficients.
 `thresholds.json` **is** the decision boundary — an unverified copy of it is a silent policy

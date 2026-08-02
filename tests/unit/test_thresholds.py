@@ -484,7 +484,7 @@ def test_flag_rates_are_computed_at_the_promoted_thresholds():
     assert out.flag_rates["toxic"] == pytest.approx(0.75)
     assert out.flag_rates["threat"] == pytest.approx(0.25)
     assert out.flag_rates["insult"] == pytest.approx(0.0)
-    assert out.n_test == 4
+    assert out.n == 4
 
 
 def test_per_label_thresholds_are_applied_per_label_not_globally():
@@ -545,7 +545,7 @@ def test_the_baseline_schema_rejects_a_missing_label():
             data_version="d" * 64,
             model_version="toxic-clf:v1",
             model_digest="sha256:" + "e" * 64,
-            n_test=10,
+            n=10,
             thresholds=dict.fromkeys(LABELS, 0.5),
             flag_rates={"toxic": 0.1},
             generated_at_utc="2026-08-02T00:00:00+00:00",
@@ -558,7 +558,7 @@ def test_the_baseline_schema_rejects_a_rate_outside_zero_to_one():
             data_version="d" * 64,
             model_version="toxic-clf:v1",
             model_digest="sha256:" + "e" * 64,
-            n_test=10,
+            n=10,
             thresholds=dict.fromkeys(LABELS, 0.5),
             flag_rates={label: (1.5 if label == "toxic" else 0.1) for label in LABELS},
             generated_at_utc="2026-08-02T00:00:00+00:00",
@@ -571,7 +571,7 @@ def test_the_baseline_schema_rejects_an_empty_test_set():
             data_version="d" * 64,
             model_version="toxic-clf:v1",
             model_digest="sha256:" + "e" * 64,
-            n_test=0,
+            n=0,
             thresholds=dict.fromkeys(LABELS, 0.5),
             flag_rates=dict.fromkeys(LABELS, 0.1),
             generated_at_utc="2026-08-02T00:00:00+00:00",
@@ -614,5 +614,5 @@ def test_the_promoted_thresholds_flow_straight_into_the_drift_reference(tmp_path
     written_rates = json.loads((tmp_path / "baseline_flag_rates.json").read_text())
     assert written_rates["thresholds"] == written_thresholds
     assert written_rates["data_version"] == "dv"
-    assert written_rates["n_test"] == 800
+    assert written_rates["n"] == 800
     assert all(0.0 <= v <= 1.0 for v in written_rates["flag_rates"].values())
