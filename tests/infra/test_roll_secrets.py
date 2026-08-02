@@ -584,7 +584,43 @@ def test_bootstrap_without_a_sha_is_a_usage_error_and_touches_nothing(box):
     assert "s3" not in box.log.read_text(encoding="utf-8")
 
 
+def test_bootstrap_creates_the_container_state_directories_under_destdir(box):
+    """The spool is created by the deploy, not by the image, and it must honour DESTDIR.
+
+    Every container in this project runs as uid 10001 and compose bind-mounts
+    /var/lib/toxic/spool into the backend. Created root-owned, the backend dies in its FastAPI
+    lifespan with `PermissionError: '/var/lib/toxic/predictions.spool'` while SSM still
+    reports Success -- which is why the directory is created here at all. Hardcoding the
+    absolute path, though, makes this script write to the HOST's /var/lib/toxic on any machine
+    that runs it, and fail outright where root is not available: exactly what the DESTDIR
+    convention exists to prevent.
+    """
+    result = box.bootstrap(SHA, "backend")
+    assert result.returncode == 0, result.stderr
+    for relative in ("var/lib/toxic", "var/lib/toxic/artifacts", "var/lib/toxic/spool"):
+        assert (box.root / relative).is_dir(), f"{relative} was not created under DESTDIR"
+
+
 # --- properties asserted about the source ------------------------------------------------
+
+
+def test_the_spool_is_handed_to_the_container_uid_and_a_failed_chown_is_fatal():
+    """Read rather than run, because no test runner is root and ownership cannot be observed
+    without being able to set it. It is here anyway: deleting the chown is invisible to every
+    other assertion in this file and it cost a live deploy -- the roll reported Success on all
+    three instances, and the backend died in its lifespan on predictions.spool."""
+    body = BOOTSTRAP.read_text(encoding="utf-8")
+    assert re.search(r'APP_UID="\$\{TOXIC_APP_UID:-10001\}"', body), (
+        "10001 is the uid every Dockerfile's `useradd --uid` declares; nothing here names it"
+    )
+    chown = re.search(
+        r'^\s*chown "\$\{APP_UID\}:\$\{APP_UID\}" "\$\{STATE_DIR\}/spool"', body, re.MULTILINE
+    )
+    assert chown, "nothing hands the spool to the container uid"
+    assert "|| die" in body[chown.end() : chown.end() + 240], (
+        "a chown that fails while root must be fatal; swallowing it restores the exact failure "
+        "this line exists to prevent, with SSM still reporting Success"
+    )
 
 
 def test_the_destdir_escape_hatch_defaults_to_the_real_filesystem():

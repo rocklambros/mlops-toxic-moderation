@@ -29,6 +29,10 @@ DESTDIR="${DESTDIR:-}"
 REGION="${AWS_REGION:-us-west-2}"
 PARAM_PREFIX="${TOXIC_PARAM_PREFIX:-/toxic}"
 APP_DIR="${DESTDIR}/opt/toxic"
+STATE_DIR="${DESTDIR}/var/lib/toxic"
+# Every image in this project declares `USER appuser`, created with --uid 10001. The number is
+# the contract between the Dockerfiles and this line; it is not a preference.
+APP_UID="${TOXIC_APP_UID:-10001}"
 
 die() { printf 'bootstrap: FATAL: %s\n' "$*" >&2; exit 1; }
 
@@ -38,6 +42,28 @@ DEPLOY_BUCKET="$(aws ssm get-parameter --region "${REGION}" \
   || die "${PARAM_PREFIX}/deploy/bucket is empty"
 
 install -d -m 0755 "${APP_DIR}"
+
+# Every image runs as `appuser`, uid 10001, and compose bind-mounts the host state dirs
+# into the container. user_data creates them as root, so the container cannot write its
+# spool: the backend dies in its FastAPI lifespan with
+# "PermissionError: [Errno 13] Permission denied: '/var/lib/toxic/predictions.spool'",
+# SSM still reports Success because `docker compose up -d` exited zero, and only the health
+# gate notices. Observed on the first real roll.
+#
+# artifacts/ stays root-owned: it is mounted read-only and the fetcher runs as root.
+install -d -m 0755 "${STATE_DIR}" "${STATE_DIR}/artifacts" "${STATE_DIR}/spool"
+# SendCommand runs AWS-RunShellScript as root, which is the only context in which this can
+# succeed and the only context a deploy ever runs in. The guard is what lets the DESTDIR
+# harness exercise the directory creation above without asking a test runner to be root, and
+# it changes nothing in production: `id -u` there is 0. A failure while root is fatal, because
+# a silently unowned spool is precisely the failure that reports Success and serves nothing.
+if [ "$(id -u)" -eq 0 ]; then
+  chown "${APP_UID}:${APP_UID}" "${STATE_DIR}/spool" \
+    || die "cannot give ${STATE_DIR}/spool to uid ${APP_UID}; the backend would die in its lifespan on predictions.spool while SSM reported Success"
+else
+  printf 'bootstrap: not root, leaving %s owned by %s (DESTDIR harness)\n' \
+    "${STATE_DIR}/spool" "$(id -un)"
+fi
 aws s3 cp --region "${REGION}" --recursive \
   "s3://${DEPLOY_BUCKET}/deploy/${SHA}/" "${APP_DIR}/"
 
