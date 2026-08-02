@@ -128,13 +128,26 @@ def test_the_frontend_is_pointed_at_the_backends_private_address():
 
 
 def test_instance_roles_can_read_the_deploy_payload_and_the_artifact_mirror():
+    """The SHARED document -- the one all three tiers get -- reaches two prefixes and no more.
+
+    This assertion used to be "no instance role names db/* anywhere in iam.tf", which was
+    correct while nothing needed that prefix and became wrong the moment the H6/H29 remediation
+    landed: RDS is private with no bastion, so `pg_dump` can only run on the backend instance,
+    and without a write there `make aws-down` refuses to stop anything and the cost control
+    dies. The grant moved to its own document attached to the backend alone
+    (`test_only_the_backend_tier_can_reach_a_database_dump` in tests/infra/test_db_lifecycle.py
+    holds that end), so what is asserted here is the part that still matters: the document the
+    two UI tiers share must not carry it.
+    """
     source = IAM.read_text(encoding="utf-8")
     assert "s3:GetObject" in source, "no instance role can fetch the deploy payload"
     assert "/deploy/*" in source and "/artifacts/*" in source, (
         "the S3 grant is not scoped to the deploy payload and the artifact mirror"
     )
-    assert '"${aws_s3_bucket.deploy.arn}/db/*"' not in source, (
-        "an instance can read the database dumps"
+    shared = source.split('data "aws_iam_policy_document" "deploy_payload"')[1].split("\n}\n")[0]
+    assert "/db/*" not in shared, (
+        "the document every tier shares reaches the database dumps; the internet-facing "
+        "Streamlit box would be able to read the whole database as a file"
     )
     for role in ("backend_deploy_payload", "frontend_deploy_payload", "monitoring_deploy_payload"):
         assert role in tfparse.resource_names("aws_iam_role_policy"), f"{role} is not attached"
