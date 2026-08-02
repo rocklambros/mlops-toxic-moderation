@@ -104,14 +104,11 @@
 locals {
   ecr_registry = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com"
 
-  # Docker Compose v2 plugin. AL2023 ships no docker-compose-plugin package, so
-  # the binary is fetched in user data and verified against this digest. The
-  # digest is recorded HERE, independently of the download, and reviewed with
-  # the code; user data does not trust the .sha256 file published next to the
-  # binary. Bump both values together, from
-  # https://github.com/docker/compose/releases/download/<tag>/docker-compose-linux-aarch64.sha256
-  compose_version = "v5.3.1"
-  compose_sha256  = "aa611e811d0ea25897839c404bfb5bf93ce706dc51c500a4457890f5d0606a86"
+  # The Compose v2 plugin version and its expected digest used to be declared
+  # here and interpolated into user data. They now live as the single pair of
+  # literals in templates/user_data.sh.tftpl: two copies of a value whose entire
+  # purpose is to be compared is a drift hazard, and the digest has to be
+  # reviewable beside the download that uses it.
 
   # Instance-to-instance traffic uses private addresses. sg-frontend permits
   # egress to 8000 only inside the public subnet CIDRs, so the Elastic IP is for
@@ -163,18 +160,16 @@ resource "aws_instance" "backend" {
     delete_on_termination = true
   }
 
-  user_data = templatefile("${path.module}/templates/user_data.sh.tftpl", {
-    region          = var.region
-    component       = "backend"
-    log_group       = aws_cloudwatch_log_group.app["backend"].name
-    ecr_registry    = local.ecr_registry
-    compose_version = local.compose_version
-    compose_sha256  = local.compose_sha256
-    db_host         = aws_db_instance.main.address
-    db_port         = aws_db_instance.main.port
-    db_name         = aws_db_instance.main.db_name
-    backend_url     = "http://127.0.0.1:8000"
-  })
+  user_data_base64 = base64gzip(templatefile("${path.module}/templates/user_data.sh.tftpl", {
+    region       = var.region
+    component    = "backend"
+    log_group    = aws_cloudwatch_log_group.app["backend"].name
+    ecr_registry = local.ecr_registry
+    db_host      = aws_db_instance.main.address
+    db_port      = aws_db_instance.main.port
+    db_name      = aws_db_instance.main.db_name
+    backend_url  = "http://127.0.0.1:8000"
+  }))
 
   # The SCP denies ec2:ModifyInstanceAttribute outright, so an in-place user_data
   # update is not an available operation; a change here is a deliberate
@@ -182,7 +177,7 @@ resource "aws_instance" "backend" {
   user_data_replace_on_change = false
 
   lifecycle {
-    ignore_changes = [ami, user_data]
+    ignore_changes = [ami, user_data, user_data_base64]
   }
 
   # ORDERING, NOT DECORATION. None of these is reachable through an attribute
@@ -259,23 +254,21 @@ resource "aws_instance" "frontend" {
     delete_on_termination = true
   }
 
-  user_data = templatefile("${path.module}/templates/user_data.sh.tftpl", {
-    region          = var.region
-    component       = "frontend"
-    log_group       = aws_cloudwatch_log_group.app["frontend"].name
-    ecr_registry    = local.ecr_registry
-    compose_version = local.compose_version
-    compose_sha256  = local.compose_sha256
-    db_host         = aws_db_instance.main.address
-    db_port         = aws_db_instance.main.port
-    db_name         = aws_db_instance.main.db_name
-    backend_url     = local.backend_internal_url
-  })
+  user_data_base64 = base64gzip(templatefile("${path.module}/templates/user_data.sh.tftpl", {
+    region       = var.region
+    component    = "frontend"
+    log_group    = aws_cloudwatch_log_group.app["frontend"].name
+    ecr_registry = local.ecr_registry
+    db_host      = aws_db_instance.main.address
+    db_port      = aws_db_instance.main.port
+    db_name      = aws_db_instance.main.db_name
+    backend_url  = local.backend_internal_url
+  }))
 
   user_data_replace_on_change = false
 
   lifecycle {
-    ignore_changes = [ami, user_data]
+    ignore_changes = [ami, user_data, user_data_base64]
   }
 
   # See the note on aws_instance.backend. This instance is in public_b, so it is
@@ -327,23 +320,21 @@ resource "aws_instance" "monitoring" {
     delete_on_termination = true
   }
 
-  user_data = templatefile("${path.module}/templates/user_data.sh.tftpl", {
-    region          = var.region
-    component       = "monitoring"
-    log_group       = aws_cloudwatch_log_group.app["monitoring"].name
-    ecr_registry    = local.ecr_registry
-    compose_version = local.compose_version
-    compose_sha256  = local.compose_sha256
-    db_host         = aws_db_instance.main.address
-    db_port         = aws_db_instance.main.port
-    db_name         = aws_db_instance.main.db_name
-    backend_url     = local.backend_internal_url
-  })
+  user_data_base64 = base64gzip(templatefile("${path.module}/templates/user_data.sh.tftpl", {
+    region       = var.region
+    component    = "monitoring"
+    log_group    = aws_cloudwatch_log_group.app["monitoring"].name
+    ecr_registry = local.ecr_registry
+    db_host      = aws_db_instance.main.address
+    db_port      = aws_db_instance.main.port
+    db_name      = aws_db_instance.main.db_name
+    backend_url  = local.backend_internal_url
+  }))
 
   user_data_replace_on_change = false
 
   lifecycle {
-    ignore_changes = [ami, user_data]
+    ignore_changes = [ami, user_data, user_data_base64]
   }
 
   # See the note on aws_instance.backend. This instance shares public_a with the

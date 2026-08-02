@@ -328,10 +328,16 @@ class BaselineFlagRates(BaseModel):
 
     model_config = ConfigDict(protected_namespaces=())
 
+    # schema_version is REQUIRED by the consumer (monitoring/baseline.py::load_baseline,
+    # SUPPORTED_SCHEMA_VERSIONS = {1}) and was absent here, and the consumer reads `n` where
+    # this emitted `n_test`. Producer and consumer had never met: both sides test against
+    # fixtures in tests/fixtures/, so neither noticed that the real file this writes could
+    # never load. Discovered when the first deploy fetched it.
+    schema_version: int = 1
     data_version: str
     model_version: str
     model_digest: str
-    n_test: int = Field(ge=1)
+    n: int = Field(ge=1)
     thresholds: dict[str, float]
     flag_rates: dict[str, float]
     generated_at_utc: str
@@ -375,7 +381,7 @@ def compute_baseline_flag_rates(
         data_version=data_version,
         model_version=model_version,
         model_digest=model_digest,
-        n_test=int(probs.shape[0]),
+        n=int(probs.shape[0]),
         thresholds=ordered,
         flag_rates={label: float(flags[:, j].mean()) for j, label in enumerate(LABELS)},
         generated_at_utc=dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat(),

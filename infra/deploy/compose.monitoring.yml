@@ -1,0 +1,55 @@
+# EC2 #3. Rubric 3.2 requires the dashboard on a different EC2 server, so this file is the
+# only thing that runs here. The DistilBERT challenger is cut-line item 3 and stays behind
+# a profile, so cutting it is a one-line change with no Terraform edit.
+name: toxic-monitoring
+
+services:
+  monitoring:
+    image: ${MONITORING_IMAGE}
+    restart: unless-stopped
+    env_file:
+      - /etc/toxic/monitoring.env
+    volumes:
+      # thresholds.json and baseline_flag_rates.json, fetched and digest-verified with the
+      # model. Read-only: the dashboard reads every number it displays out of the database
+      # as monitoring_ro, and these two are model artifacts rather than metrics handed to
+      # it by another process.
+      - /var/lib/toxic/artifacts:/artifacts:ro
+    ports:
+      - "8502:8502"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8502/_stcore/health').status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      # Matches monitoring/Dockerfile. See the note in compose.backend.yml.
+      start_period: 120s
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_REGION}
+        awslogs-group: ${LOG_GROUP_MONITORING}
+        awslogs-stream: monitoring
+        awslogs-create-group: "false"
+
+  rescorer:
+    profiles: ["challenger"]
+    image: ${RESCORER_IMAGE}
+    restart: unless-stopped
+    env_file:
+      - /etc/toxic/rescorer.env
+    volumes:
+      - /var/lib/toxic/artifacts:/artifacts:ro
+    # No healthcheck: the worker publishes no port and serves no request, so there is
+    # nothing to probe. Its liveness signal is review_queue rows advancing from 'pending'
+    # to 'rescored', which the dashboard's queue-depth caption shows.
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_REGION}
+        # Its own group, explicitly. This host's Docker daemon default points at the
+        # monitoring group, so without this line the challenger's output interleaves with
+        # the graded dashboard's.
+        awslogs-group: ${LOG_GROUP_RESCORER}
+        awslogs-stream: rescorer
+        awslogs-create-group: "false"

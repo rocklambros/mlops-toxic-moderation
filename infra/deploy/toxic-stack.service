@@ -1,0 +1,38 @@
+[Unit]
+Description=Toxic moderation stack
+Documentation=https://github.com/rocklambros/mlops-toxic-moderation/blob/main/infra/ROLLBACK.md
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+# A first boot happens before any deploy has uploaded anything, so there is nothing to
+# start. Without this, the unit fails and retries every RestartSec forever and
+# `systemctl status` reads "failed" on a host with no SSH -- indistinguishable from a real
+# fault. With it, it reads "condition failed", which is the truth.
+#
+# /opt/toxic/compose.yml is a symlink that user data points at this instance's component
+# file, so one unit serves all three instances without a template parameter. A dangling
+# symlink does not satisfy ConditionPathExists, which is the wanted behaviour: the compose
+# file the symlink names has to actually be there.
+ConditionPathExists=/opt/toxic/compose.yml
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/toxic
+# An ECR authorization token expires after 12 hours and the stack is stopped between
+# sessions by design, so the token obtained during bootstrap is always expired by the next
+# start. The leading '-' makes failure non-fatal: a transient IAM or network problem must
+# not stop containers whose images are already on disk from coming back.
+ExecStartPre=-/usr/local/bin/toxic-ecr-login
+ExecStart=/usr/bin/docker compose --env-file /etc/toxic/stack.env -f /opt/toxic/compose.yml up -d --remove-orphans
+ExecStop=/usr/bin/docker compose --env-file /etc/toxic/stack.env -f /opt/toxic/compose.yml down
+# A cold pull of five arm64 images over the instance's own egress, with no NAT and no
+# registry cache in front of it.
+TimeoutStartSec=900
+# RDS can still be starting when EC2 finishes booting, and the backend's lifespan fails
+# closed on an unreachable database. One failure is not terminal.
+Restart=on-failure
+RestartSec=20
+
+[Install]
+WantedBy=multi-user.target

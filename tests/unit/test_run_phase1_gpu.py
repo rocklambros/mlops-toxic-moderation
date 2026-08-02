@@ -246,6 +246,42 @@ def test_the_code_archive_carries_no_data_and_no_git(tmp_path: Path) -> None:
     assert "infra/runpod/register_pod_artifacts.py" in names
 
 
+def test_the_code_archive_carries_no_terraform_working_directory(tmp_path: Path) -> None:
+    """`.terraform/` is a build product of `terraform init`, not source, and the pod has no
+    Terraform in it. Measured on 2026-08-02, before the exclude existed: 805 MB of members,
+    788 MB of which was a single `hashicorp/aws` provider binary -- built for linux_arm64,
+    because this box is a Jetson, and therefore not even loadable on the x86-64 pod it was
+    being shipped to. It compressed to a 164 MB archive scp'd to a GPU pod that bills by the
+    second while it waits.
+
+    `.terraform/terraform.tfstate` is the sharper half. It is not the state file, but it does
+    record the backend configuration -- bucket, key, region -- and handing that to a rented
+    third-party host is the same class of exposure as the account ids this repo keeps out of
+    its committed docs.
+
+    This also removes a real flake. `.terraform/` is the one part of the tree that mutates
+    during ordinary work, so a `terraform plan` running alongside the suite made tar exit 1
+    with "file changed as we read it", which is how this was found."""
+    import tarfile
+
+    with tarfile.open(dep.make_code_archive(tmp_path / "code.tar.gz")) as tar:
+        names = tar.getnames()
+    assert not [n for n in names if ".terraform/" in n or n.endswith("/.terraform")], (
+        "the code archive carries the Terraform working directory"
+    )
+    assert "infra/terraform/.terraform.lock.hcl" in names, (
+        "the exclude overshot: `.terraform.lock.hcl` is committed source -- it pins the "
+        "provider hashes -- and only the `.terraform/` build directory should be dropped"
+    )
+    assert not [n for n in names if n.endswith(".tfstate") or ".tfstate." in n], (
+        "the code archive carries Terraform state"
+    )
+    assert "infra/terraform/backend.tf" in names, (
+        "the exclude overshot: the Terraform source itself should still travel, since the "
+        "archive is also what a reviewer on the pod reads"
+    )
+
+
 # The Phase 0 pipeline. `prepare_dataset` costs 13.6 minutes of CPU and is reachable from
 # exactly one place -- `--build-cache`, which runs on the Jetson -- so `datasketch` and
 # `iterstrat` are build-box requirements, not pod requirements. The exclusion is only sound

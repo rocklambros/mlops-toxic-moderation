@@ -4,6 +4,9 @@
 # stack. Rendered by templatefile() from infra/terraform/compute.tf, once per
 # instance, with that component's name and log group baked in.
 #
+# Terraform template variables: ${region} ${component} ${log_group}
+#                               ${ecr_registry}
+#
 # This host has no SSH, no bastion and no NAT (foundation spec 7.1). Everything
 # below therefore assumes that if it fails, the only evidence available is what
 # reached the serial console. Three rules follow from that:
@@ -12,9 +15,8 @@
 #      works even when the SSM agent never registered (premortem C6).
 #   2. An ERR trap prints a FAILED marker naming the command that died, because
 #      "user data did not finish" is not a diagnosis.
-#   3. The script ends with an externally observable COMPLETE marker on three
-#      independent channels: the serial console, CloudWatch Logs, and a sentinel
-#      file. See section 7.
+#   3. The script ends with an externally observable COMPLETE marker on four
+#      independent channels. See the last section.
 #
 # Ordering rule: anything that can fail on a transient AWS condition runs AFTER
 # the systemd unit is installed, so a slow IAM propagation cannot leave the box
@@ -23,22 +25,47 @@
 # Nothing secret is written by this script. The instance profile is the only
 # credential on the box; there are no static keys anywhere.
 # ---------------------------------------------------------------------------
-set -Eeuxo pipefail
+set -euxo pipefail
+# `-E` as well, and deliberately on its own line. It propagates the ERR trap into
+# functions and subshells, so a failure inside one of the helpers below is
+# reported by on_error rather than returning quietly. Kept separate because the
+# combined form is the string tests/unit/test_user_data.py pins, and a bootstrap
+# that loses `-e` is a bootstrap that reports success after failing.
+set -E
 
 exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
 
 COMPONENT='${component}'
 REGION='${region}'
 LOG_GROUP='${log_group}'
-APP_DIR=/opt/toxic-mod
-ENV_FILE=/etc/toxic-mod.env
-UNIT=/etc/systemd/system/toxic-mod.service
-SENTINEL=/var/lib/cloud/toxic-mod-bootstrapped
+
+APP_DIR=/opt/toxic
+STATE_DIR=/var/lib/toxic
+UNIT=/etc/systemd/system/toxic-stack.service
+SENTINEL=/var/lib/cloud/toxic-stack-bootstrapped
 
 # `docker` searches several cli-plugins directories; /usr/libexec/docker/cli-plugins
 # is the one the AL2023 docker package itself owns, so a plugin dropped here is
 # found by the packaged CLI with no DOCKER_CONFIG or PATH manipulation.
 COMPOSE_PLUGIN_DIR=/usr/libexec/docker/cli-plugins
+
+# The Compose v2 CLI plugin is not in the AL2023 repositories under any package
+# name, so it is fetched as a release binary and checked against this digest
+# before it is installed. Installing an unverified binary here would be a
+# supply-chain hole on a host that holds an instance profile.
+#
+# The digest is recorded HERE, in the reviewed source, and is deliberately NOT
+# the file published beside the binary: fetching the expected value from the
+# same host that serves the artifact proves the transfer was not truncated and
+# proves nothing about provenance, because anything able to serve a malicious
+# binary can serve its expected digest too. The delivery spec makes independent
+# recording of an expected digest normative.
+#
+# Bump the two lines together, from the release's published checksum list, and
+# review them as a pair. They live here rather than in compute.tf so that there
+# is exactly one copy of a value whose whole purpose is to be compared.
+COMPOSE_VERSION=v5.3.1
+COMPOSE_SHA256=aa611e811d0ea25897839c404bfb5bf93ce706dc51c500a4457890f5d0606a86
 
 console() {
   printf '%s\n' "$*" >/dev/console 2>/dev/null || true
@@ -47,92 +74,112 @@ console() {
 
 on_error() {
   rc=$?
-  console "TOXIC_MOD_USER_DATA_FAILED component=$COMPONENT rc=$rc cmd=$BASH_COMMAND"
+  console "TOXIC-USER-DATA-FAILED component=$COMPONENT rc=$rc cmd=$BASH_COMMAND"
   exit $rc
 }
 trap on_error ERR
 
-console "TOXIC_MOD_USER_DATA_START component=$COMPONENT region=$REGION"
+console "TOXIC-USER-DATA-START component=$COMPONENT region=$REGION"
 
 # ---------------------------------------------------------------------------
-# 1. Docker engine
+# 1. Directories
+#
+# /etc/toxic is 0700 because roll.sh writes credentials into it. A 0755
+# directory leaves a 0600 file listable, and anything written into it later by
+# hand inherits the default umask.
+#
+# CONTRACT WITH THE DEPLOY (Phase 5 Tasks 9 and 10). Nothing here fetches an
+# application artifact, because the SSM roll is the delivery path by design:
+#   /opt/toxic/compose.<component>.yml   the component compose file
+#   /opt/toxic/{bootstrap,roll,fetch_artifacts}.sh
+#   /etc/toxic/stack.env                 AWS_REGION and the LOG_GROUP_* names
+#   /etc/toxic/<service>.env             0600, written from Secrets Manager
+#   /var/lib/toxic/artifacts/            digest-verified model artifacts
+# Until the first roll lands, /opt/toxic/compose.yml is a dangling symlink, the
+# unit's ConditionPathExists is false, and `systemctl status` reads "condition
+# failed" rather than "failed". That is the intended first-boot state.
+# ---------------------------------------------------------------------------
+install -d -m 0755 "$APP_DIR" "$STATE_DIR" "$STATE_DIR/artifacts" "$STATE_DIR/spool"
+install -d -m 0700 /etc/toxic
+
+# ---------------------------------------------------------------------------
+# 2. Prove there is a route out before anything needs one (premortem H26)
+#
+# aws_eip_association runs AFTER this instance is created, so until it lands the
+# only route out is the address the subnet auto-assigns. network.tf sets
+# map_public_ip_on_launch on both public subnets for exactly this reason. If it
+# is ever turned off there is no route at all: package installs hang, the
+# Compose download fails, and the SSM Agent never reaches ssm and ssmmessages on
+# 443 -- so the instance never registers, and with no SSH, no bastion and no NAT
+# that is an unrecoverable box. The worst version of that is a silent hang, so
+# the wait is bounded and names the three knobs to check when it gives up.
+#
+# The loop probes the regional SSM endpoint, because SSM reachability is the
+# property that decides whether this host is recoverable at all. `-f` is
+# deliberately absent: any HTTP response, including an unauthenticated 404,
+# proves DNS, routing and a TLS handshake on 443. Authorisation is a different
+# question and is not this one. The loop is the retry, so the probe does not
+# also retry internally.
+# ---------------------------------------------------------------------------
+EGRESS_WAIT_SECONDS=300
+
+wait_for_egress() {
+  local deadline
+  deadline=$(( $(date +%s) + EGRESS_WAIT_SECONDS ))
+  until curl -sS -o /dev/null --max-time 8 "https://ssm.$REGION.amazonaws.com"; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      console "TOXIC-USER-DATA-FAILED component=$COMPONENT reason=no egress route after $EGRESS_WAIT_SECONDS seconds -- check map_public_ip_on_launch on the public subnets, the 0.0.0.0/0 route on the public route table, and the security group egress rules"
+      return 1
+    fi
+    sleep 5
+  done
+}
+
+wait_for_egress
+# Which address this host actually goes out as. Diagnostic, not a gate: before
+# the EIP associates it is the subnet's auto-assigned address and afterwards it
+# is the Elastic IP, and knowing which one answered is the difference between
+# "the association has not landed yet" and "the association is broken".
+curl -fsS --retry 3 --retry-delay 2 --max-time 15 -o /var/log/toxic-egress-address https://checkip.amazonaws.com
+console "TOXIC-USER-DATA-EGRESS-OK component=$COMPONENT address=$(cat /var/log/toxic-egress-address)"
+
+# ---------------------------------------------------------------------------
+# 3. Docker engine
 # ---------------------------------------------------------------------------
 dnf -y install docker
 systemctl enable --now docker
 usermod -aG docker ec2-user
 
 # ---------------------------------------------------------------------------
-# 2. Docker Compose v2 plugin
+# 4. Docker Compose v2 plugin
 #
-# AL2023 has NO docker-compose-plugin package. `dnf install docker` installs the
-# engine and the CLI and nothing else, so `docker compose` does not exist until
-# this block runs -- which is the failure that would turn Phase 5's compose-based
-# roll into a day-13 surprise.
-#
-# The expected digest is ${compose_sha256}, pinned as a literal in compute.tf and
-# code-reviewed there. It is deliberately NOT the .sha256 file GitHub publishes
-# beside the binary: fetching the digest from the same host as the artifact
-# proves the transfer was not truncated and proves nothing about provenance,
-# because anything able to serve a malicious binary can serve its digest too.
-# The delivery spec makes independent recording of an expected digest normative
-# ("recorded independently ... never derived from the artifact being loaded").
+# `dnf install docker` installs the engine and the CLI and nothing else, so
+# `docker compose` does not exist until this block runs -- which is the failure
+# that would turn the compose-based roll into a day-13 surprise.
 # ---------------------------------------------------------------------------
 install -d -m 0755 "$COMPOSE_PLUGIN_DIR"
-compose_tmp=$(mktemp -d)
-curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused --max-time 300 \
+compose_tmp="$(mktemp -d)"
+curl -fsSL --retry 8 --retry-delay 5 --retry-connrefused --max-time 300 \
   -o "$compose_tmp/docker-compose" \
-  'https://github.com/docker/compose/releases/download/${compose_version}/docker-compose-linux-aarch64'
-printf '%s  %s\n' '${compose_sha256}' "$compose_tmp/docker-compose" | sha256sum -c -
-install -m 0755 "$compose_tmp/docker-compose" "$COMPOSE_PLUGIN_DIR/docker-compose"
+  "https://github.com/docker/compose/releases/download/$COMPOSE_VERSION/docker-compose-linux-aarch64"
+printf '%s  %s\n' "$COMPOSE_SHA256" "$compose_tmp/docker-compose" | sha256sum -c -
+install -m 0755 "$compose_tmp/docker-compose" /usr/libexec/docker/cli-plugins/docker-compose
 rm -rf "$compose_tmp"
 docker compose version
 
 # ---------------------------------------------------------------------------
-# 3. Deploy-time environment
-#
-# Phase 5's docker-compose.yml and its SSM roll read this file and nothing else.
-# It holds addresses and names only: every secret is fetched at container start
-# from Secrets Manager through the instance profile.
-#
-# TOXIC_MOD_BACKEND_URL is the backend's PRIVATE address on purpose. The frontend
-# security group permits egress to 8000 only within the public subnet CIDRs, so
-# traffic aimed at the backend's Elastic IP would leave through the internet
-# gateway, miss that rule, and be dropped. The public backend_url in outputs.tf
-# is for humans and graders, not for instance-to-instance calls.
-# ---------------------------------------------------------------------------
-cat >"$ENV_FILE" <<'TOXICMODENV'
-AWS_REGION=${region}
-AWS_DEFAULT_REGION=${region}
-TOXIC_MOD_COMPONENT=${component}
-TOXIC_MOD_LOG_GROUP=${log_group}
-TOXIC_MOD_ECR_REGISTRY=${ecr_registry}
-TOXIC_MOD_BACKEND_URL=${backend_url}
-TOXIC_MOD_DB_HOST=${db_host}
-TOXIC_MOD_DB_PORT=${db_port}
-TOXIC_MOD_DB_NAME=${db_name}
-TOXICMODENV
-chmod 0644 "$ENV_FILE"
-
-# ---------------------------------------------------------------------------
-# 4. Container logs must leave the box (premortem H27)
+# 5. Container logs must leave the box (premortem H27)
 #
 # The daemon default is set so a container started by hand, by compose, or by
 # SSM Run Command all ship to CloudWatch without anyone remembering to pass
-# --log-driver. The log group already exists in Terraform, so the instance role
-# needs CreateLogStream and PutLogEvents only, never logs:CreateLogGroup.
+# --log-driver. The production compose files still name a group and a stream
+# explicitly, because the re-scorer shares the monitoring host and would
+# otherwise interleave with the graded dashboard. The log group already exists
+# in Terraform, so the instance role needs CreateLogStream and PutLogEvents
+# only, never logs:CreateLogGroup.
 #
-# Two consequences worth knowing before debugging this box:
-#   - `docker logs` stops working locally; read the group instead:
-#       aws logs tail ${log_group} --follow
-#   - the monitoring host also runs the re-scorer, whose container must pass
-#       --log-opt awslogs-group=/<project>/rescorer
-#     explicitly, because this default points at the monitoring group.
-#
-# The explicit per-container form, for SSM Run Command and the runbooks:
-#   docker run --log-driver=awslogs \
-#     --log-opt awslogs-region=${region} \
-#     --log-opt awslogs-group=${log_group} \
-#     --log-opt awslogs-stream=${component} ...
+# `docker logs` stops working locally once this is in force; read the group:
+#   aws logs tail ${log_group} --follow
 #
 # A malformed daemon.json bricks Docker on a host with no SSH, so the config is
 # accepted only after the daemon is proven to come back. If it does not, the
@@ -140,7 +187,7 @@ chmod 0644 "$ENV_FILE"
 # and the ROLLBACK marker on the console says which one happened.
 # ---------------------------------------------------------------------------
 install -d -m 0755 /etc/docker
-cat >/etc/docker/daemon.json <<'TOXICMODDOCKER'
+cat >/etc/docker/daemon.json <<'TOXICDOCKERD'
 {
   "log-driver": "awslogs",
   "log-opts": {
@@ -148,7 +195,7 @@ cat >/etc/docker/daemon.json <<'TOXICMODDOCKER'
     "awslogs-group": "${log_group}"
   }
 }
-TOXICMODDOCKER
+TOXICDOCKERD
 
 docker_ready() {
   for _ in $(seq 1 15); do
@@ -159,29 +206,29 @@ docker_ready() {
 }
 
 if ! systemctl restart docker || ! docker_ready; then
-  console "TOXIC_MOD_USER_DATA_LOGDRIVER_ROLLBACK component=$COMPONENT"
+  console "TOXIC-USER-DATA-LOGDRIVER-ROLLBACK component=$COMPONENT"
   rm -f /etc/docker/daemon.json
   systemctl restart docker
   docker_ready
 fi
 
 # ---------------------------------------------------------------------------
-# 5. ECR login helper
+# 6. ECR login helper
 #
 # An ECR authorization token expires after 12 hours, so logging in once during
 # bootstrap would leave a stopped-then-started instance unable to pull. The
 # helper is written here and invoked as ExecStartPre on every boot instead.
 # ---------------------------------------------------------------------------
-cat >/usr/local/bin/toxic-mod-ecr-login <<'TOXICMODLOGIN'
+cat >/usr/local/bin/toxic-ecr-login <<'TOXICECRLOGIN'
 #!/bin/bash
 set -euo pipefail
 aws ecr get-login-password --region '${region}' \
   | docker login --username AWS --password-stdin '${ecr_registry}'
-TOXICMODLOGIN
-chmod 0755 /usr/local/bin/toxic-mod-ecr-login
+TOXICECRLOGIN
+chmod 0755 /usr/local/bin/toxic-ecr-login
 
 # ---------------------------------------------------------------------------
-# 6. Start the APPLICATION at boot, not just the instance
+# 7. Start the APPLICATION at boot, not just the instance (REG-5)
 #
 # The cost model instructs stopping EC2 and RDS between sessions and a nightly
 # EventBridge schedule enforces it, so this host is started far more often than
@@ -189,97 +236,127 @@ chmod 0755 /usr/local/bin/toxic-mod-ecr-login
 # instances and zero running containers, and the demo URL is dead until somebody
 # re-runs the deploy workflow.
 #
-# ConditionPathExists makes the unit a no-op until Phase 5's deploy lands a
-# compose file: `systemctl status` then reads "condition failed" rather than
-# "failed", so a first boot does not leave a red unit behind.
-#
-# CONTRACT WITH PHASE 5: the deploy must write exactly
-#   /opt/toxic-mod/docker-compose.yml
-# Not compose.yaml, not a subdirectory. Both the condition and -f name that
-# path literally, so a different filename silently produces a running instance
-# with no containers -- which is the failure this unit exists to prevent.
+# The unit is carried inline rather than fetched, because on a first boot
+# nothing has delivered anything to this host yet. tests/unit/test_user_data.py
+# asserts this heredoc is byte-for-byte infra/deploy/toxic-stack.service, which
+# is the file tests/unit/test_systemd_unit.py makes its assertions about.
 # ---------------------------------------------------------------------------
-install -d -m 0755 "$APP_DIR"
-
-cat >"$UNIT" <<'TOXICMODUNIT'
+cat >"$UNIT" <<'TOXICSTACKUNIT'
 [Unit]
-Description=toxic-moderation application stack (docker compose)
+Description=Toxic moderation stack
+Documentation=https://github.com/rocklambros/mlops-toxic-moderation/blob/main/infra/ROLLBACK.md
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target
-ConditionPathExists=/opt/toxic-mod/docker-compose.yml
+# A first boot happens before any deploy has uploaded anything, so there is nothing to
+# start. Without this, the unit fails and retries every RestartSec forever and
+# `systemctl status` reads "failed" on a host with no SSH -- indistinguishable from a real
+# fault. With it, it reads "condition failed", which is the truth.
+#
+# /opt/toxic/compose.yml is a symlink that user data points at this instance's component
+# file, so one unit serves all three instances without a template parameter. A dangling
+# symlink does not satisfy ConditionPathExists, which is the wanted behaviour: the compose
+# file the symlink names has to actually be there.
+ConditionPathExists=/opt/toxic/compose.yml
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-WorkingDirectory=/opt/toxic-mod
-EnvironmentFile=/etc/toxic-mod.env
-ExecStartPre=/usr/local/bin/toxic-mod-ecr-login
-ExecStart=/usr/bin/docker compose -f /opt/toxic-mod/docker-compose.yml --env-file /etc/toxic-mod.env up -d --remove-orphans
-ExecStop=/usr/bin/docker compose -f /opt/toxic-mod/docker-compose.yml down --remove-orphans
+WorkingDirectory=/opt/toxic
+# An ECR authorization token expires after 12 hours and the stack is stopped between
+# sessions by design, so the token obtained during bootstrap is always expired by the next
+# start. The leading '-' makes failure non-fatal: a transient IAM or network problem must
+# not stop containers whose images are already on disk from coming back.
+ExecStartPre=-/usr/local/bin/toxic-ecr-login
+ExecStart=/usr/bin/docker compose --env-file /etc/toxic/stack.env -f /opt/toxic/compose.yml up -d --remove-orphans
+ExecStop=/usr/bin/docker compose --env-file /etc/toxic/stack.env -f /opt/toxic/compose.yml down
+# A cold pull of five arm64 images over the instance's own egress, with no NAT and no
+# registry cache in front of it.
 TimeoutStartSec=900
+# RDS can still be starting when EC2 finishes booting, and the backend's lifespan fails
+# closed on an unreachable database. One failure is not terminal.
 Restart=on-failure
-RestartSec=30s
+RestartSec=20
 
 [Install]
 WantedBy=multi-user.target
-TOXICMODUNIT
+TOXICSTACKUNIT
+
+# One unit serves all three instances: this symlink is the only thing that
+# differs between them, and it is what tells the host which component it runs.
+ln -sfn "$APP_DIR/compose.${component}.yml" /opt/toxic/compose.yml
 
 systemctl daemon-reload
-systemctl enable toxic-mod.service
-systemctl start toxic-mod.service || systemctl status --no-pager --full toxic-mod.service || true
+systemctl enable toxic-stack.service
 
 # ---------------------------------------------------------------------------
-# 6b. Warm the ECR credential
+# 8. Warm the ECR credential
 #
 # Non-fatal and retried: an instance profile can take a few seconds to become
 # usable, and a transient 403 here must not abort a bootstrap that has already
-# installed everything the deploy needs. The outcome is reported in the marker
-# below as ecr_login=ok|failed rather than being swallowed.
+# installed everything the deploy needs. The outcome is carried into the marker
+# as ecr_login=ok|failed rather than being swallowed.
 # ---------------------------------------------------------------------------
 ECR_LOGIN=failed
 for attempt in 1 2 3 4 5; do
-  if /usr/local/bin/toxic-mod-ecr-login; then
+  if /usr/local/bin/toxic-ecr-login; then
     ECR_LOGIN=ok
     break
   fi
-  console "TOXIC_MOD_USER_DATA_ECR_LOGIN_RETRY component=$COMPONENT attempt=$attempt"
+  console "TOXIC-USER-DATA-ECR-LOGIN-RETRY component=$COMPONENT attempt=$attempt"
   sleep 10
 done
 
 # ---------------------------------------------------------------------------
-# 7. Externally observable success marker
+# 9. Externally observable success marker (premortem H26)
 #
 # "Externally observable" means observable from a laptop with the AWS CLI and
-# nothing else -- no SSH, no SSM session, no container. Three channels, in the
-# order they survive failure:
+# nothing else -- no SSH, no SSM session, no container. A boot that half
+# succeeded looks exactly like a boot that is still in progress, so the operator
+# needs one question with a yes-or-no answer that can be asked from outside.
+# Four channels, in the order they survive failure:
 #
 #   1. Serial console. Survives a dead SSM agent, which is the C6 failure mode:
 #        aws ec2 get-console-output --instance-id i-... --output text \
-#          | grep TOXIC_MOD_USER_DATA_
-#   2. CloudWatch Logs, stream "bootstrap" in this tier's own group:
+#          | grep TOXIC-USER-DATA-
+#   2. Sentinel file, for an SSM Run Command check after the fact:
+#        test -f /var/lib/cloud/toxic-stack-bootstrapped
+#   3. CloudWatch Logs, stream "bootstrap" in this tier's own group:
 #        aws logs tail ${log_group} --since 30m
 #      Best effort: a logging permission problem must not fail a boot that
 #      otherwise succeeded, so both calls are non-fatal.
-#   3. Sentinel file, for an SSM Run Command check after the fact:
-#        test -f /var/lib/cloud/toxic-mod-bootstrapped
+#   4. SSM Parameter Store, and this one is the LAST LINE deliberately:
+#        aws ssm get-parameter --name /toxic/boot/<component>
+#      Everything above either succeeded or `set -e` already killed this script,
+#      so the presence of that parameter is the whole answer to "did the boot
+#      finish?". It is NOT written with `|| true`: aws_up.sh waits on it, and a
+#      marker that may be absent on a successful boot is a marker that cannot be
+#      waited on -- worse, a swallowed failure leaves the PREVIOUS boot's value
+#      in place and the wait returns immediately on a stale answer. If
+#      PutParameter is denied, the ERR trap says so on the console, which is
+#      exactly the diagnosis wanted. The grant is aws_iam_role_policy.boot_marker
+#      in iam.tf, scoped to /toxic/boot/*.
 #
-# Reading the instance id through IMDSv2 is also the live proof that
-# http_tokens=required and http_put_response_hop_limit=2 are working: this exact
-# PUT-then-GET is what a container does to obtain credentials, so if it fails
-# here the ERR trap says so on the console instead of the failure surfacing as
-# "Unable to locate credentials" inside a container three hours later.
+# The marker answers "user data finished", NOT "the application is up".
+# verify_deploy.sh answers the second question, and conflating the two would
+# hide which of them failed.
+#
+# Reading through IMDSv2 is also the live proof that http_tokens=required and
+# http_put_response_hop_limit=2 are working: this exact PUT-then-GET is what a
+# container does to obtain credentials, so a failure here surfaces on the
+# console now instead of as "Unable to locate credentials" three hours later.
 # ---------------------------------------------------------------------------
-IMDS_TOKEN=$(curl -fsS --max-time 5 -X PUT 'http://169.254.169.254/latest/api/token' \
-  -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')
-INSTANCE_ID=$(curl -fsS --max-time 5 -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
-  'http://169.254.169.254/latest/meta-data/instance-id')
+IMDS_TOKEN="$(curl -fsS --retry 3 --retry-delay 2 --max-time 10 -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')"
+AMI_ID="$(curl -fsS --retry 3 --retry-delay 2 --max-time 10 -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" 'http://169.254.169.254/latest/meta-data/ami-id')"
+INSTANCE_ID="$(curl -fsS --retry 3 --retry-delay 2 --max-time 10 -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" 'http://169.254.169.254/latest/meta-data/instance-id')"
+BOOTED_AT="$(date -Is)"
 
-MARKER="TOXIC_MOD_USER_DATA_COMPLETE component=$COMPONENT instance=$INSTANCE_ID compose=${compose_version} ecr_login=$ECR_LOGIN at=$(date -u +%FT%TZ)"
+MARKER="TOXIC-USER-DATA-COMPLETE component=$COMPONENT instance=$INSTANCE_ID ami=$AMI_ID compose=$COMPOSE_VERSION ecr_login=$ECR_LOGIN at=$BOOTED_AT"
 
 printf '%s\n' "$MARKER" >"$SENTINEL"
 chmod 0644 "$SENTINEL"
 console "$MARKER"
+sync
 
 aws logs create-log-stream --region "$REGION" \
   --log-group-name "$LOG_GROUP" --log-stream-name bootstrap >/dev/null 2>&1 || true
@@ -288,4 +365,4 @@ aws logs put-log-events --region "$REGION" \
   --log-events "$(printf '[{"timestamp":%s000,"message":"%s"}]' "$(date +%s)" "$MARKER")" \
   >/dev/null 2>&1 || true
 
-sync
+aws ssm put-parameter --region ${region} --name "/toxic/boot/${component}" --type String --overwrite --value "ok $BOOTED_AT $AMI_ID"

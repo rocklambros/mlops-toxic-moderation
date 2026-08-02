@@ -124,7 +124,7 @@ ui-lock: check-py
 	  --output-file requirements/ui.txt requirements/ui.in
 	rm -rf .venv-lock
 
-.PHONY: monitor-lock rescorer-lock security-lock
+.PHONY: monitor-lock rescorer-lock security-lock artifacts-lock
 
 # The scanners. Their own surface, so a semgrep resolution failure on aarch64 cannot stop
 # the test suite from being lockable (see the header of requirements/security.in).
@@ -143,6 +143,18 @@ monitor-lock: check-py
 	.venv-lock/bin/pip install --require-hashes --only-binary=:all: -r requirements/pip-tools.txt
 	PIP_ONLY_BINARY=:all: .venv-lock/bin/pip-compile --generate-hashes \
 	  --output-file requirements/monitor.txt requirements/monitor.in
+	rm -rf .venv-lock
+
+# The artifact-bake image (infra/deploy/Dockerfile.artifacts), and nothing else. It is the
+# one image in this project that ever holds WANDB_API_KEY, so installing the registry client
+# there without hash verification would be premortem C11 pointed at the worst possible
+# target: fetching the client without integrity checking, inside the build that mounts the
+# credential. Its own surface, because nothing in the test environment imports wandb.
+artifacts-lock: check-py
+	$(PY) -m venv .venv-lock
+	.venv-lock/bin/pip install --require-hashes --only-binary=:all: -r requirements/pip-tools.txt
+	PIP_ONLY_BINARY=:all: .venv-lock/bin/pip-compile --generate-hashes --allow-unsafe \
+	  --output-file requirements/artifacts.txt requirements/artifacts.in
 	rm -rf .venv-lock
 
 # The challenger re-scorer. Installed by nothing else, so cutting it (ordered cut list item
@@ -185,6 +197,41 @@ seed-demo:
 
 seed-demo-purge:
 	PYTHONHASHSEED=0 $(BIN)/python -m scripts.seed_demo --csv $(SEED_CSV) --purge --n 0
+
+.PHONY: aws-up aws-down aws-destroy db-dump db-restore rollback deploy-verify
+AWS ?= infra/aws
+
+# The session lifecycle. Every one of these is an operator action from the IAM Identity Center
+# session; none of them runs in GitHub Actions, and only `aws-destroy` runs Terraform.
+
+db-dump:
+	$(AWS)/db_dump.sh
+
+# db-dump is a PREREQUISITE, not a step inside the recipe, so no future edit can reorder it
+# into a data-loss bug: make cannot run aws-down without running db-dump first. `aws_down.sh`
+# then checks S3 for a dump newer than an hour and refuses without one, because a Make
+# prerequisite orders two commands and does not stop anyone from running the second alone.
+aws-down: db-dump
+	$(AWS)/aws_down.sh
+
+aws-destroy: db-dump
+	cd infra/terraform && terraform destroy
+
+aws-up:
+	$(AWS)/aws_up.sh
+
+deploy-verify:
+	$(AWS)/verify_live.sh
+
+# No default for S3_KEY, deliberately. Restoring "the latest" silently is how the wrong
+# dataset ends up in the graded dashboard; db_restore.sh with no key lists what is available
+# and exits non-zero.
+db-restore:
+	$(AWS)/db_restore.sh $(S3_KEY)
+
+# SHA is optional: empty re-rolls /toxic/deploy/previous-sha.
+rollback:
+	$(AWS)/rollback.sh $(SHA)
 
 .PHONY: scan gitleaks-checksums
 

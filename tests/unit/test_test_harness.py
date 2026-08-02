@@ -222,13 +222,34 @@ def test_a_ci_run_in_which_every_test_skipped_is_not_green(tmp_path):
     assert "no test executed" in output
 
 
-def test_a_ci_run_whose_integration_tests_all_skip_is_not_green():
-    """The shape the plan was aiming at, reached without a database: this selects the one
-    integration-marked test whose precondition is a file that is not in the repository, so
-    it skips. One skipped integration test, zero passed, exit 0 -- until the guard."""
+def test_a_ci_run_whose_integration_tests_all_skip_is_not_green(tmp_path):
+    """The shape the plan was aiming at, reached without a database: one skipped integration
+    test, zero passed, exit 0 -- until the guard.
+
+    The skip is forced by a throwaway plugin for the same reason as the test above, and this
+    one learned it the hard way. It used to borrow the skip from
+    test_real_corpus_is_present_and_matches_recorded_provenance, whose precondition is that
+    `data/raw/jigsaw-toxic-comment-train.csv` is absent. On 2026-08-02 the corpus was fetched
+    to rebuild the held-out split, that test started passing, and this one failed with "1
+    passed, 3 deselected" -- not because the guard regressed but because its fixture was
+    really a property of the developer's disk. Selection stays `-m integration`, because it
+    is the integration-specific branch of the guard that is under test here."""
+    plugin = tmp_path / "skipintegration.py"
+    plugin.write_text(
+        "import pytest\n\n"
+        "@pytest.hookimpl(tryfirst=True)\n"
+        "def pytest_runtest_call(item):\n"
+        "    pytest.skip('forced skip inside the call phase')\n",
+        encoding="utf-8",
+    )
     result = run_pytest(
-        ["tests/unit/test_run_cli.py", "-m", "integration"],
-        {"PYTHONHASHSEED": "0", "CI": "true", "TEST_DATABASE_URL": "postgresql://set/but-unused"},
+        ["tests/unit/test_run_cli.py", "-m", "integration", "-p", "skipintegration"],
+        {
+            "PYTHONHASHSEED": "0",
+            "CI": "true",
+            "TEST_DATABASE_URL": "postgresql://set/but-unused",
+            "PYTHONPATH": str(tmp_path),
+        },
     )
     output = result.stdout + result.stderr
     assert "1 skipped" in output, (

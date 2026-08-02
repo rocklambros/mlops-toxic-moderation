@@ -1,0 +1,63 @@
+# EC2 #2. Two Streamlit processes from the same repository, different entry points.
+#
+# 8501 is the graded user interface. 8503 is the reviewer queue and binds loopback only,
+# reached through an SSM port-forward session; it is never carried by the demo ingress
+# toggle, because opening it would hand the graded feedback metric to any visitor.
+name: toxic-frontend
+
+services:
+  frontend:
+    image: ${FRONTEND_IMAGE}
+    restart: unless-stopped
+    env_file:
+      - /etc/toxic/frontend.env
+    ports:
+      - "8501:8501"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health').status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      # Matches frontend/Dockerfile. See the note in compose.backend.yml: a shorter value
+      # here would replace the image's HEALTHCHECK and narrow its cold-start headroom.
+      start_period: 120s
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_REGION}
+        awslogs-group: ${LOG_GROUP_FRONTEND}
+        awslogs-stream: frontend
+        awslogs-create-group: "false"
+
+  reviewer:
+    image: ${REVIEWER_IMAGE}
+    restart: unless-stopped
+    env_file:
+      # The same file as the user interface, deliberately. Both entry points read exactly
+      # the backend URL and the demo key and nothing else (frontend/ui.py and
+      # frontend/reviewer.py); the reviewer shared secret is a backend-side credential and
+      # is not on this host at all. Naming either variable in full here would trip the
+      # literal-credential guard in tests/unit/test_compose_production.py, which does not
+      # read comments differently from values -- and should not.
+      - /etc/toxic/frontend.env
+    ports:
+      # Loopback on the host, deliberately. The security groups carry no rule for 8503 at
+      # all, so this bind is the second of two independent reasons the reviewer console is
+      # unreachable from the internet rather than the only one.
+      - "127.0.0.1:8503:8503"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8503/_stcore/health').status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_REGION}
+        # The frontend host has ONE Terraform log group (aws_cloudwatch_log_group.app is
+        # keyed on the four components, and "reviewer" is not one of them). Two entry points
+        # on one host are therefore separated by stream, not by group.
+        awslogs-group: ${LOG_GROUP_FRONTEND}
+        awslogs-stream: reviewer
+        awslogs-create-group: "false"

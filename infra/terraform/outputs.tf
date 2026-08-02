@@ -79,6 +79,17 @@ output "db_host" {
   value       = aws_db_instance.main.address
 }
 
+# The identifier, not the endpoint. `aws rds stop-db-instance` and `aws rds
+# start-db-instance` take --db-instance-identifier, and `infra/aws/aws_down.sh`
+# and `infra/aws/aws_up.sh` read it from here. Without this output those two
+# commands fail with `Output "db_instance_id" not found` -- aws_down.sh after the
+# dump has already run, which is the most confusing possible moment. Not
+# sensitive: it is `<project>-pg` and carries no account id.
+output "db_instance_id" {
+  description = "RDS instance identifier, for aws rds stop-db-instance and start-db-instance in the session lifecycle commands."
+  value       = aws_db_instance.main.identifier
+}
+
 output "db_name" {
   description = "Initial database name, declared in exactly one place and read from here by the SSM bootstrap document, the user-data environment file and the application connection strings."
   value       = aws_db_instance.main.db_name

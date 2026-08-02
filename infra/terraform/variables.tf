@@ -274,6 +274,30 @@ variable "github_repo" {
   }
 }
 
+# ---- the deployed model and its reviewer ----------------------------------
+
+variable "wandb_artifact" {
+  description = "Registry path infra/deploy/instance/fetch_artifacts.sh asks for, in the entity/project/collection:alias form the wandb CLI takes. Published to SSM rather than hardcoded in the script, because promoting a new model version must not require a code change on three instances. Public: MODEL_CARD.md section 9 records the same path, and the registry page is logged-out readable."
+  type        = string
+  default     = "rockcyber-org/wandb-registry-model/toxic-clf:production"
+
+  validation {
+    condition     = can(regex("^[^/]+/[^/]+/[^:]+:.+$", var.wandb_artifact))
+    error_message = "The wandb_artifact must be entity/project/collection:alias, for example rockcyber-org/wandb-registry-model/toxic-clf:production."
+  }
+}
+
+variable "reviewer_id" {
+  description = "The single reviewer identity backend/reviewer_auth.py returns when a session token verifies. Not a credential: the shared secret is the authenticator and lives in Secrets Manager. An unset value makes every token authenticate nobody, which is why it has a default rather than being optional."
+  type        = string
+  default     = "rock"
+
+  validation {
+    condition     = length(var.reviewer_id) > 0
+    error_message = "The reviewer_id must not be empty; an empty identity authenticates nobody and the review queue is unusable."
+  }
+}
+
 # ---- alerting and budget --------------------------------------------------
 
 variable "alert_email" {

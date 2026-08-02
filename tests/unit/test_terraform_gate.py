@@ -16,6 +16,7 @@ Two assertions, deliberately different in kind:
   a green result here would say "Terraform is valid" about a tree containing no Terraform.
 """
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -87,9 +88,18 @@ def test_the_pinned_terraform_version_is_a_version_the_job_can_install():
     )
 
 
-def test_terraform_fmt_and_validate_pass_on_the_tree_this_branch_carries():
+def test_terraform_fmt_and_validate_pass_on_the_tree_this_branch_carries(tmp_path):
     """The commands the runner will run, run here. Skipped -- loudly, with the reason named --
-    rather than passed, when there is nothing to run them against."""
+    rather than passed, when there is nothing to run them against.
+
+    `init` and `validate` run against a throwaway TF_DATA_DIR rather than the working tree's
+    own `.terraform/`. `-backend=false` does NOT stop Terraform using a backend that is
+    already initialised: on 2026-08-02, after a real apply on this machine, it read the
+    recorded S3 backend and failed with "No valid credential sources found" while the
+    configuration itself was perfectly valid. CI never saw it, because a fresh clone has no
+    `.terraform/` to find -- so the test was green exactly where it was least needed and red
+    only on the box that had actually deployed. Isolating the data dir makes the two agree
+    and keeps the test about the configuration, not about local state or credentials."""
     if not TF_ROOT.is_dir() or not any(TF_ROOT.rglob("*.tf")):
         pytest.skip(
             "NOT VERIFIED: infra/terraform is absent from this branch (Phase A2 is unmerged), "
@@ -107,13 +117,14 @@ def test_terraform_fmt_and_validate_pass_on_the_tree_this_branch_carries():
     )
     assert fmt.returncode == 0, f"terraform fmt -check reported drift:\n{fmt.stdout}{fmt.stderr}"
 
+    env = {**os.environ, "TF_DATA_DIR": str(tmp_path / "tfdata"), "TF_INPUT": "0"}
     init = subprocess.run(
         [binary, "init", "-backend=false", "-input=false"],
-        cwd=TF_ROOT, capture_output=True, text=True,
+        cwd=TF_ROOT, capture_output=True, text=True, env=env,
     )
     assert init.returncode == 0, f"terraform init failed:\n{init.stdout}{init.stderr}"
     validate = subprocess.run(
-        [binary, "validate"], cwd=TF_ROOT, capture_output=True, text=True
+        [binary, "validate"], cwd=TF_ROOT, capture_output=True, text=True, env=env
     )
     assert validate.returncode == 0, (
         f"terraform validate failed:\n{validate.stdout}{validate.stderr}"

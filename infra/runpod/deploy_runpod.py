@@ -1108,6 +1108,16 @@ def make_code_archive(
             "--exclude=__pycache__",
             "--exclude=*.pyc",
             "--exclude=.git",
+            # `terraform init` leaves 768 MB of provider binaries under
+            # infra/terraform/.terraform, built for this box's linux_arm64 and therefore not
+            # even loadable on the x86-64 pod. .terraform/terraform.tfstate additionally
+            # records the backend bucket, key and region, which a rented GPU host has no
+            # business holding. Excluding the directory also removes the only part of the
+            # tree that mutates during ordinary work, and with it a tar that exits 1 with
+            # "file changed as we read it" whenever a plan happens to be running.
+            "--exclude=.terraform",
+            "--exclude=*.tfstate",
+            "--exclude=*.tfstate.*",
             # The archive is written by uid 1000 on this box and unpacked by root inside a
             # container that does not hold CAP_CHOWN. GNU tar running as root restores
             # ownership by default, fails with "Cannot change ownership to uid 1000", and

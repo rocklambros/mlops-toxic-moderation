@@ -153,15 +153,71 @@ data "aws_iam_policy_document" "gha_deploy" {
     resources = ["*"]
   }
 
+  # The deploy payload. `bootstrap.sh` pulls s3://<deploy bucket>/deploy/<sha>/ onto each
+  # instance, so something has to put it there, and that something is this role. Reads are
+  # granted too: `make db-restore` and the rollback path read from the same bucket.
+  #
+  # Scoped to ONE bucket by ARN. The CloudTrail bucket and the Terraform state bucket are
+  # not reachable from here, and the blanket Deny below keeps it that way.
+  statement {
+    sid    = "S3DeployBucketOnly"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:GetObjectVersion",
+      "s3:PutObject",
+      "s3:ListBucket",
+      "s3:ListBucketVersions",
+    ]
+    resources = [
+      aws_s3_bucket.deploy.arn,
+      "${aws_s3_bucket.deploy.arn}/*",
+    ]
+  }
+
+  # The deploy job reads the endpoints, the bucket name and the four ECR repository names from
+  # Parameter Store rather than running `terraform output` inside a world-readable Actions log.
+  statement {
+    sid       = "SsmReadTheDeployNamespace"
+    effect    = "Allow"
+    actions   = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"]
+    resources = ["arn:aws:ssm:${var.region}:${local.account_id}:parameter/toxic/*"]
+  }
+
+  # The narrower write the read grant above promised, and nothing wider. `record_deploy.sh` is
+  # the LAST step of a successful deploy -- after five images are pushed, after the roll, after
+  # the health gate went green -- so a missing verb here fails at the single most expensive
+  # point in the pipeline and leaves the rollback pointer describing a SHA that is no longer
+  # serving.
+  #
+  # Two parameters, by full name rather than by prefix. /toxic/endpoints/* is what the health
+  # gate probes and /toxic/images/* is where every image push is aimed: a role that could
+  # rewrite either could redirect the gate at something it controls and report a green deploy.
+  statement {
+    sid     = "SsmRecordWhichShaIsServing"
+    effect  = "Allow"
+    actions = ["ssm:PutParameter"]
+    resources = [
+      "arn:aws:ssm:${var.region}:${local.account_id}:parameter/toxic/deploy/current-sha",
+      "arn:aws:ssm:${var.region}:${local.account_id}:parameter/toxic/deploy/previous-sha",
+    ]
+  }
+
   # Second layer. The Allow set above is already narrow; this makes privilege
   # escalation and infrastructure change impossible to reintroduce by editing one
   # statement, and an explicit Deny cannot be overridden by any later Allow.
   #
   #   iam / sso / organizations / sts:AssumeRole -- no path to another identity
-  #   ec2 / rds / s3                             -- apply belongs to the operator
+  #   ec2 / rds                                  -- apply belongs to the operator
   #   ssm:StartSession                           -- CI never gets a shell
   #   ecr delete verbs                           -- rollback targets survive a
   #                                                 compromise of this role
+  #
+  # `s3:*` is NOT in this list, and its absence is deliberate rather than an oversight. It
+  # was here, and an explicit Deny cannot be overridden by any later Allow -- so the
+  # statement above would have been dead text and every deploy would have failed at the
+  # payload upload with AccessDenied. The S3 Deny is expressed separately, below, as a
+  # NotResource: everything except the one bucket this role is allowed to touch.
   statement {
     sid    = "DenyPrivilegeEscalationAndInfrastructureChange"
     effect = "Deny"
@@ -174,12 +230,25 @@ data "aws_iam_policy_document" "gha_deploy" {
       "ec2:RunInstances",
       "ec2:TerminateInstances",
       "rds:*",
-      "s3:*",
       "ssm:StartSession",
       "ecr:DeleteRepository",
       "ecr:BatchDeleteImage",
     ]
     resources = ["*"]
+  }
+
+  # Every S3 object in the account except the deploy bucket, denied outright. The Terraform
+  # state bucket and the CloudTrail bucket are the two that matter: a role that can rewrite
+  # state can describe the whole account on the next apply, and a role that can delete trail
+  # objects can erase its own footprints.
+  statement {
+    sid     = "DenyS3EverywhereExceptTheDeployBucket"
+    effect  = "Deny"
+    actions = ["s3:*"]
+    not_resources = [
+      aws_s3_bucket.deploy.arn,
+      "${aws_s3_bucket.deploy.arn}/*",
+    ]
   }
 }
 

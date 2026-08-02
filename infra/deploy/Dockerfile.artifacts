@@ -1,0 +1,75 @@
+# syntax=docker/dockerfile:1.10
+# Optional, and OFF the deploy path. This bakes the registered model artifact into a tiny
+# image so the S3 mirror that backs `fetch_artifacts.sh` can be seeded from a reproducible
+# place, and so a bring-up can proceed with no call to Weights & Biases at all.
+#
+# It is the ONLY image in this project that ever sees WANDB_API_KEY. The five serving images
+# never see it: the artifact reaches an instance through the deploy-time fetch, under the
+# instance profile, long after any image was built.
+#
+# Build (the key never becomes an argument, an ENV, or a shell history entry):
+#   umask 077
+#   pass show wandb/api-key | tr -d '\n' > "/run/user/$(id -u)/wandb_api_key"
+#   DOCKER_BUILDKIT=1 docker build -f infra/deploy/Dockerfile.artifacts \
+#     --secret id=wandb_api_key,src="/run/user/$(id -u)/wandb_api_key" \
+#     --build-arg ARTIFACT=toxic-clf --build-arg VERSION=production \
+#     --target artifacts -t toxic-artifacts:production .
+#   shred -u "/run/user/$(id -u)/wandb_api_key"
+#
+# Prove nothing was captured:
+#   docker history --no-trunc toxic-artifacts:production | grep -ci wandb_api_key
+#
+# The mount is a tmpfs that exists for the duration of one RUN and is not part of the layer
+# filesystem. There is no ARG and no ENV carrying the key, so `docker history`, `docker
+# inspect --format '{{json .Config.Env}}'` and an unpacked layer tarball all show nothing.
+#
+# This file is deliberately NOT one of the `*/Dockerfile*` surfaces that
+# tests/unit/test_dockerfile_hygiene.py holds to the serving-image rules: the final stage is
+# `FROM scratch`, there is no runtime and no USER, and the single wheel it installs is not in
+# any serving lock. tests/unit/test_buildkit_secrets.py is what governs it.
+FROM python:3.11-slim-bookworm@sha256:b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba AS fetch
+
+# The registry coordinates, and nothing sensitive. `wandb artifact get` takes
+# <entity>/<project>/<collection>:<alias>; the promoted org-scoped registry path recorded in
+# MODEL_CARD.md section 9 is rockcyber-org/wandb-registry-model/toxic-clf:production.
+ARG ARTIFACT=toxic-clf
+ARG VERSION=production
+ARG WANDB_ENTITY=rockcyber-org
+ARG WANDB_PROJECT=wandb-registry-model
+
+# Hash-verified, wheels-only, from requirements/artifacts.txt (`make artifacts-lock`).
+# Fetching the registry client without integrity checking, inside the one build that mounts
+# the registry credential, is premortem C11 pointed at the worst possible target.
+COPY requirements/artifacts.txt requirements/artifacts.txt
+RUN pip install --require-hashes --only-binary=:all: -r requirements/artifacts.txt
+
+WORKDIR /work
+COPY MODEL_CARD.md /work/MODEL_CARD.md
+
+# One RUN, so the mount covers the fetch and the verification and nothing survives either.
+#
+# The expected digest is read from the git-committed card and is anchored on the
+# `- MODEL_DIGEST:` label, which is the same anchor backend/model_card.py uses. Taking "the
+# first 64-hex string in the file" would silently become the corpus digest, the split digest
+# or the environment digest the moment section 9 is reordered -- and the bake would then
+# verify a different value from the one the serving loader fails closed on.
+RUN --mount=type=secret,id=wandb_api_key \
+    set -eu; \
+    WANDB_API_KEY="$(cat /run/secrets/wandb_api_key)"; export WANDB_API_KEY; \
+    wandb artifact get \
+      "${WANDB_ENTITY}/${WANDB_PROJECT}/${ARTIFACT}:${VERSION}" --root /work/artifacts; \
+    unset WANDB_API_KEY; \
+    EXPECTED="$(sed -n 's/^- MODEL_DIGEST: sha256:\([0-9a-f]\{64\}\)$/\1/p' \
+      /work/MODEL_CARD.md | head -1)"; \
+    test -n "${EXPECTED}"; \
+    printf '%s  /work/artifacts/%s.skops\n' "${EXPECTED}" "${ARTIFACT}" | sha256sum -c -
+
+# Nothing but the verified bytes. No shell, no package manager, no credential material, and
+# no parent layer that ever held any -- the fetch stage is discarded.
+FROM scratch AS artifacts
+COPY --from=fetch /work/artifacts /artifacts
+# Numeric, because `scratch` has no /etc/passwd for a name to resolve against. This image is
+# only ever `docker create`d so its contents can be copied out, but the last USER in a file
+# is what an image runs as, and leaving it at root here would be the one Dockerfile in the
+# repository that does (tests/unit/test_image_pinning.py walks all of them).
+USER 10001:10001

@@ -1,0 +1,43 @@
+# EC2 #1. Pulled by /opt/toxic/roll.sh, started by the toxic-stack systemd unit.
+#
+# Every value that varies comes from /etc/toxic/stack.env, which user data seeds at first
+# boot with the values Terraform knows (AWS_REGION, the log group names) and roll.sh
+# rewrites on every deploy with the image digests. Nothing secret is in that file or in
+# this one: per-service credentials arrive in /etc/toxic/backend.env, which roll.sh writes
+# 0600 from Secrets Manager under the instance profile.
+#
+# `restart: unless-stopped` is half of REG-5 and not the whole of it. It brings back
+# containers that already exist when the daemon starts, which covers a stop/start cycle. It
+# does nothing on a replaced instance, nothing after a rollback ran `compose down`, and
+# nothing if the project was never created -- that is what the systemd unit is for.
+name: toxic-backend
+
+services:
+  backend:
+    image: ${BACKEND_IMAGE}
+    restart: unless-stopped
+    env_file:
+      - /etc/toxic/backend.env
+    volumes:
+      - /var/lib/toxic/artifacts:/artifacts:ro
+      - /var/lib/toxic/spool:/var/lib/toxic
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      # 180s, matching backend/Dockerfile, NOT a shorter compose default. A `healthcheck:`
+      # block replaces the image's HEALTHCHECK wholesale, so a smaller number here silently
+      # undoes the headroom that exists because uvicorn does not bind until the lifespan has
+      # loaded and digest-verified the artifact. Every probe before that is refused by a
+      # container that is perfectly healthy.
+      start_period: 180s
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_REGION}
+        awslogs-group: ${LOG_GROUP_BACKEND}
+        awslogs-stream: backend
+        awslogs-create-group: "false"

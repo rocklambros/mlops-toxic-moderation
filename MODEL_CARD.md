@@ -9,7 +9,7 @@ rounding an estimate into a claim.
 
 | | |
 |---|---|
-| **Artifact digest** | `sha256:db678467907743fbce5d25ab8c9ad56cd0c89e053b46be81822dcb2095842454` |
+| **Artifact digest** | `sha256:63d96d6da37dd6da3915048f729ca52b1ede5152434e4d0279bdd6b767fba5e4` |
 | **Registry (public, logged-out)** | <https://wandb.ai/rockcyber-org/wandb-registry-model/artifacts/model/toxic-clf> |
 | **Promoted stage** | `production` (collection `toxic-clf`, version `v0`) |
 | **Training / evaluation run** | <https://wandb.ai/rockcyber/mlops-toxic-moderation/runs/dnvoc420> |
@@ -469,8 +469,8 @@ this corpus is the 180,633 training rows recorded in §6.
 | | |
 |---|---|
 | File | `toxic-clf.skops` |
-| SHA-256 | `db678467907743fbce5d25ab8c9ad56cd0c89e053b46be81822dcb2095842454` |
-| Size | 400,229,552 bytes |
+| SHA-256 | `63d96d6da37dd6da3915048f729ca52b1ede5152434e4d0279bdd6b767fba5e4` |
+| Size | 321,407,256 bytes |
 | Format | `skops` archive (zip container with `schema.json`), verified as such before upload |
 | Registry | `rockcyber-org/wandb-registry-model/toxic-clf:production` |
 
@@ -546,6 +546,40 @@ genai-security-project completeness evaluator. The fields above cover its substa
 
 ## Artifact digest of record
 
+| Artifact | sha256 |
+|---|---|
+| `toxic-clf.skops` | `63d96d6da37dd6da3915048f729ca52b1ede5152434e4d0279bdd6b767fba5e4` |
+| `thresholds.json` | `56d2e48834b676d03eadc4920330da73e6a6af8c13ffe306646a63bbcb8c6635` |
+| `baseline_flag_rates.json` | `af1b2ef4661b6cce902f500e290cb1b3aaa2d28d63c041261e46cea4be8caa5b` |
+
+Three artifacts, because two of them are as security-relevant as the coefficients.
+`thresholds.json` **is** the decision boundary — an unverified copy of it is a silent policy
+change that no metric would flag — and `baseline_flag_rates.json` is the reference the drift
+panel measures production against. Both are mounted read-only into a container that fails
+closed without them, so both are fetched and digest-verified exactly the way the model is.
+
+**`baseline_flag_rates.json` has not been produced.** Its row above is not a digest of a
+file: it is the SHA-256 of the sentence
+
+```
+PENDING PHASE 1 PROMOTION: baseline_flag_rates.json has not been produced
+```
+
+which no artifact can match — the same fail-closed sentinel this section carried for the
+model before Phase 1 promoted one. The monitoring instance's roll therefore stops with
+`digest mismatch on baseline_flag_rates.json` rather than starting a dashboard whose drift
+panel has nothing to drift from. Producing it needs the held-out probabilities in
+`artifacts/test_probabilities.npz` and `model.thresholds.compute_baseline_flag_rates`; it is
+**not** byte-reproducible (it stamps `generated_at_utc`), so the digest of record must be
+computed from the exact file that is uploaded, and this row replaced with it.
+
+The table is keyed on the **filename**, and it is read that way rather than by position.
+`infra/deploy/instance/fetch_artifacts.sh` looks each artifact up by its own name, because
+"the first 64-hex string in this file" silently becomes the corpus digest, the split digest
+or the environment digest the moment section 9 is reordered — and the fetcher would then be
+verifying a value the serving loader never checks. It is also the key of the S3 mirror the
+deploy falls back to, so a row here is what makes an object findable at all.
+
 The serving backend refuses to load any artifact whose SHA-256 differs from this value, and
 refuses to start if the `MODEL_DIGEST` environment variable differs from it. This block is the
 provenance anchor: it lives in git rather than in the registry, so an attacker holding the
@@ -557,7 +591,7 @@ This value was **computed from the artifact in hand**, not transcribed from the 
 
 ```bash
 sha256sum artifacts/toxic-clf.skops | cut -d' ' -f1
-# db678467907743fbce5d25ab8c9ad56cd0c89e053b46be81822dcb2095842454
+# 63d96d6da37dd6da3915048f729ca52b1ede5152434e4d0279bdd6b767fba5e4
 ```
 
 A transcribed digest is a digest the registry supplied, which is exactly the co-location this
@@ -572,5 +606,5 @@ This block replaced a deliberate fail-closed sentinel (the SHA-256 of the string
 backend refused to start until a real model was promoted. Phase 1 has now promoted one.
 
 - MODEL_ARTIFACT: toxic-clf
-- MODEL_REGISTRY_VERSION: 0
-- MODEL_DIGEST: sha256:db678467907743fbce5d25ab8c9ad56cd0c89e053b46be81822dcb2095842454
+- MODEL_REGISTRY_VERSION: 1
+- MODEL_DIGEST: sha256:63d96d6da37dd6da3915048f729ca52b1ede5152434e4d0279bdd6b767fba5e4
