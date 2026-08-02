@@ -479,3 +479,146 @@ def test_the_instance_ids_output_is_a_map_the_teardown_can_iterate():
     outputs = tfparse.source_of("outputs.tf")
     assert 'output "instance_ids"' in outputs
     assert 'output "db_instance_id"' in outputs
+
+
+# --------------------------------------------------------------------------------------
+# Task 18: the other half. A dump nobody has restored is a hypothesis.
+# --------------------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def restore(tmp_path: Path):
+    """Runs db_restore.sh and hands back (result, trace lines, captured remote script)."""
+    bin_dir = tmp_path / "bin"
+    make_stub(bin_dir, "aws", CAPTURING_AWS_STUB)
+    fake = tmp_path / "scripts"
+    trace = tmp_path / "trace"
+    capture = tmp_path / "captured.sh"
+    make_stub(fake, "ssm_run.sh", f'#!/bin/bash\necho "$*" >> "{trace}"\nexit 0\n')
+
+    def go(args):
+        result = run(
+            RESTORE,
+            list(args),
+            bin_dir,
+            env={
+                "STUB_JOURNAL": str(tmp_path / "journal"),
+                "STUB_CAPTURE": str(capture),
+                "DB_RESTORE_SCRIPT_DIR": str(fake),
+            },
+        )
+        return (
+            result,
+            trace.read_text().splitlines() if trace.exists() else [],
+            capture.read_text(encoding="utf-8") if capture.exists() else "",
+        )
+
+    return go
+
+
+def test_db_restore_requires_an_explicit_key(tmp_path):
+    """Restoring 'the latest' silently is how the wrong dataset ends up in the dashboard."""
+    bin_dir = tmp_path / "bin"
+    make_stub(bin_dir, "aws", AWS_STUB)
+    result = run(RESTORE, [], bin_dir, env={"STUB_JOURNAL": str(tmp_path / "j")})
+    assert result.returncode != 0
+    assert "S3_KEY" in result.stderr or "usage" in result.stderr
+
+
+def test_db_restore_lists_available_dumps_when_it_refuses(tmp_path):
+    bin_dir = tmp_path / "bin"
+    make_stub(bin_dir, "aws", AWS_STUB)
+    result = run(RESTORE, [], bin_dir, env={"STUB_JOURNAL": str(tmp_path / "j")})
+    assert "db/2026-08-14T18-02-11Z.dump" in result.stdout + result.stderr
+
+
+def test_db_restore_refuses_a_key_outside_the_dump_prefix(tmp_path):
+    """`make db-restore S3_KEY=deploy/current/roll.sh` would hand pg_restore a shell script,
+    after --clean had already dropped the tables."""
+    bin_dir = tmp_path / "bin"
+    make_stub(bin_dir, "aws", AWS_STUB)
+    result = run(
+        RESTORE, ["deploy/current/roll.sh"], bin_dir, env={"STUB_JOURNAL": str(tmp_path / "j")}
+    )
+    assert result.returncode != 0
+    assert "db/" in result.stderr
+
+
+def test_db_restore_runs_on_the_instance_through_the_asserted_ssm_path():
+    body = shell_code(RESTORE)
+    assert "ssm_run.sh" in body
+    assert "pg_restore" in body
+
+
+def test_db_restore_is_idempotent_and_does_not_stack_duplicate_rows():
+    body = shell_code(RESTORE)
+    assert "--clean" in body and "--if-exists" in body
+
+
+def test_db_restore_touches_no_infrastructure():
+    assert "terraform" not in shell_code(RESTORE).lower()
+
+
+def test_db_restore_round_trips_a_dump(restore):
+    """The command exists, takes a key, and reaches the instance through ssm_run.sh."""
+    result, trace, _script = restore(["db/2026-08-14T18-02-11Z.dump"])
+    assert result.returncode == 0, result.stderr
+    assert trace, "nothing was sent to the instance"
+    assert trace[0].startswith("backend 1 "), trace
+
+
+def test_db_restore_fetches_its_remote_script_rather_than_assuming_it(restore):
+    """Same trap as the dump: /opt/toxic holds what bootstrap.sh copied from deploy/<sha>/."""
+    _result, trace, _script = restore(["db/2026-08-14T18-02-11Z.dump"])
+    payload = trace[0]
+    assert "/opt/toxic/" not in payload, payload
+    assert "aws s3 cp" in payload and "s3://" in payload, payload
+
+
+def test_the_generated_restore_script_is_valid_bash(restore, tmp_path):
+    _result, _trace, script = restore(["db/2026-08-14T18-02-11Z.dump"])
+    assert script, "db_restore.sh uploaded no remote script"
+    path = tmp_path / "remote-restore.sh"
+    path.write_text(script, encoding="utf-8")
+    assert subprocess.run(
+        ["bash", "-n", str(path)], capture_output=True, text=True, check=False
+    ).returncode == 0
+
+
+def _without_comments(script: str) -> str:
+    """`shell_code` for a string rather than a file. The generated scripts explain `--clean`
+    in a comment two paragraphs above the line that uses it, and an ordering check that reads
+    the prose finds the flag in the wrong place."""
+    return "\n".join(
+        line for line in script.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+def test_the_archive_is_proved_readable_before_anything_is_dropped(restore):
+    """`--clean --if-exists` DROPs every table and then loads. Point it at a truncated archive
+    -- which `aws s3 cp -` produces whenever a dump's pipe broke -- and the drop succeeds, the
+    load fails, and the graded dataset is gone. The table of contents is read FIRST."""
+    _result, _trace, script = restore(["db/2026-08-14T18-02-11Z.dump"])
+    script = _without_comments(script)
+    listing = script.find("--list")
+    clean = script.find("--clean")
+    assert listing >= 0, "nothing verifies the archive before the restore"
+    assert clean >= 0
+    assert listing < clean, "the archive is verified after the tables have been dropped"
+
+
+def test_the_restore_is_a_single_transaction(restore):
+    """A restore that fails halfway leaves the dashboard reading half a dataset and reporting
+    it as fact. Either all of it lands or none of it does."""
+    _result, _trace, script = restore(["db/2026-08-14T18-02-11Z.dump"])
+    assert "--single-transaction" in _without_comments(script)
+
+
+def test_the_dump_is_materialised_before_it_is_replayed(restore):
+    """Streaming S3 straight into `pg_restore --clean` means the DROPs are already committed
+    by the time a short read is discovered. The object lands on disk, is checked, replayed,
+    and removed."""
+    _result, _trace, script = restore(["db/2026-08-14T18-02-11Z.dump"])
+    script = _without_comments(script)
+    assert not re.search(r"aws s3 cp[^\n]*-\s*\|\s*docker[^\n]*pg_restore[^\n]*--clean", script)
+    assert re.search(r"\brm -f\b", script), "the fetched dump is left on the instance volume"
