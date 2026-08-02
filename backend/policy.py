@@ -20,6 +20,25 @@ BLOCK_LABELS: tuple[str, ...] = ("severe_toxic", "threat", "identity_hate")
 BLOCK_MARGIN: float = 0.15
 REVIEW_MARGIN: float = 0.10
 
+# The review band widens *downward* from the threshold, and an absolute margin cannot do
+# that safely when the threshold is smaller than the margin. Phase 1 tuned severe_toxic,
+# threat and identity_hate to 0.05 -- the rare labels, where recall is bought cheaply -- so
+# `threshold - REVIEW_MARGIN` was -0.05. No probability is negative, so that comparison was
+# true for every input, the review branch matched unconditionally, and `allow` was
+# unreachable code for the entire life of the deployment. Every request served was review or
+# block; the review queue received 100% of traffic and the random-audit stratum, which
+# samples *allowed* traffic, was necessarily empty, so live accuracy could not be estimated.
+#
+# The floor is therefore relative as well as absolute: at least half the threshold, whatever
+# the margin says. For the three thresholds above 0.20 this changes nothing at all -- 0.31
+# still yields 0.21, not 0.155 -- so the fix is confined to the degenerate case it is for.
+REVIEW_FLOOR_RATIO: float = 0.5
+
+
+def review_floor(threshold: float) -> float:
+    """The bottom of the review band for one label. Always strictly positive."""
+    return max(threshold - REVIEW_MARGIN, threshold * REVIEW_FLOOR_RATIO)
+
 
 @dataclass(frozen=True)
 class DecisionResult:
@@ -45,7 +64,7 @@ def decide(probs: dict[str, float], thresholds: dict[str, float]) -> DecisionRes
         decision = "block"
     elif any(flags.values()):
         decision = "review"
-    elif any(probs[label] >= thresholds[label] - REVIEW_MARGIN for label in LABELS):
+    elif any(probs[label] >= review_floor(thresholds[label]) for label in LABELS):
         decision = "review"
     else:
         decision = "allow"

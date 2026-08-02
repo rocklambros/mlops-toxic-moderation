@@ -93,3 +93,60 @@ def test_load_thresholds_rejects_an_out_of_range_value(tmp_path):
     path.write_text(json.dumps({**THRESHOLDS, "threat": 1.4}), encoding="utf-8")
     with pytest.raises(ValueError, match="threat"):
         load_thresholds(path)
+
+
+# The tuned thresholds this project actually deploys, from the Phase 1 artifact. The suite
+# above runs entirely against a uniform 0.50, which is a comfortable value that hides the
+# whole class of bug below: with REVIEW_MARGIN = 0.10 a threshold of 0.50 leaves a review
+# band floor of 0.40, and everything behaves. Three of the six real thresholds are 0.05.
+TUNED_THRESHOLDS = {
+    "toxic": 0.31,
+    "severe_toxic": 0.05,
+    "obscene": 0.25,
+    "threat": 0.05,
+    "insult": 0.28,
+    "identity_hate": 0.05,
+}
+
+
+def test_allow_is_reachable_under_the_tuned_thresholds():
+    """`allow` was dead code in production for the entire life of the deployment.
+
+    The review band is `threshold - REVIEW_MARGIN`. REVIEW_MARGIN is 0.10 and severe_toxic,
+    threat and identity_hate are all tuned to 0.05, so the band floor was -0.05. No
+    probability is ever below zero, so the review branch matched unconditionally and the
+    else that produces `allow` could not be reached by any input at all.
+
+    Observed 2026-08-02 against the live backend: "Thank you for the helpful edit, I
+    appreciate it." scored toxic=0.00023 with every flag false, and came back
+    decision="review". Seeding 2000 held-out comments produced 2000 review rows, 0 allows,
+    and seed_demo's own exit criterion failed with "the random-audit stratum is empty, so
+    live accuracy stays biased" -- which is the downstream harm: the audit stratum samples
+    allowed traffic, so a system that never allows anything can never measure its own
+    false-negative rate."""
+    result = decide({label: 0.0 for label in LABELS}, TUNED_THRESHOLDS)
+    assert result.decision == "allow", (
+        f"a zero-probability input is not allowed under the deployed thresholds; "
+        f"got {result.decision}"
+    )
+
+
+@pytest.mark.parametrize("threshold", [0.01, 0.05, 0.10, 0.25, 0.50, 0.99])
+def test_a_zero_probability_input_is_allowed_at_every_threshold(threshold):
+    """The property the case above is one instance of. Whatever the tuning produces, an
+    input the model is certain is clean must be allowed, so no future retune can quietly
+    make `allow` unreachable again."""
+    result = decide({label: 0.0 for label in LABELS}, {label: threshold for label in LABELS})
+    assert result.decision == "allow", f"threshold {threshold} makes allow unreachable"
+
+
+def test_the_review_band_never_extends_below_zero():
+    """Stated directly, so the failure names the cause rather than a symptom. A band floor
+    at or below zero is not a wide band -- it is a disabled branch."""
+    from backend.policy import review_floor
+
+    for label, threshold in TUNED_THRESHOLDS.items():
+        assert review_floor(threshold) > 0.0, (
+            f"{label}: review band floor is {review_floor(threshold)}, so every input "
+            f"matches the review branch and `allow` is unreachable"
+        )
