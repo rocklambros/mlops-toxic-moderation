@@ -1,0 +1,206 @@
+name: deploy
+
+# C7: infrastructure changes never run unattended, and this workflow is structurally unable to
+# make one. `infra/terraform/oidc.tf` grants the deploy role no `iam:*`, no `ec2:RunInstances`
+# and an explicit Deny on `rds:*`, so `terraform apply` is an operator action from the IAM
+# Identity Center session and a documentation commit cannot replace three instances
+# mid-grading. paths-ignore stops a docs push from starting a deploy at all.
+#
+# THE MODEL_CARD.md TRAP, recorded here because here is where the next person edits the
+# filter. `**.md` also matches MODEL_CARD.md, and that file is not documentation: it is the
+# digest of record. backend/Dockerfile bakes it into the image, and roll.sh reads MODEL_DIGEST
+# and MODEL_REGISTRY_VERSION out of the copy in the deploy payload. A card-only commit
+# therefore lands on main and does NOT reach production, and the next unrelated code push
+# carries the model change with it. That trade is deliberate -- README churn must not re-roll
+# three instances during a grading window -- but it is not automatic. After changing
+# MODEL_CARD.md, deploy it on purpose:
+#
+#   gh workflow run deploy.yml --ref main
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - '.github/ISSUE_TEMPLATE/**'
+      - 'LICENSE'
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'Git SHA to build, deploy and record (defaults to the dispatched ref)'
+        required: false
+
+# H35: the repository default workflow permission is *write* -- confirmed against the live
+# repository, not assumed. An empty map here forces every job to opt in to exactly what it
+# needs, and makes a job added later start from nothing rather than from write.
+permissions: {}
+
+# Two concurrent rolls put two SHAs across three instances. Cancelling one mid-roll leaves the
+# fleet split across both, which is worse than either, so a second push queues behind the
+# first rather than replacing it.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-west-2
+  # `github.event.inputs` is populated only for workflow_dispatch, so a push falls through to
+  # its own SHA. Every image tag, every S3 prefix and the recorded pointer come from this one
+  # value, and so does the tree that is checked out -- see the checkout steps.
+  IMAGE_TAG: ${{ github.event.inputs.sha || github.sha }}
+
+jobs:
+  build:
+    name: Build and push arm64 images
+    runs-on: ubuntu-24.04-arm
+    # NOT optional, and not a review gate that happens to be here. The OIDC trust policy in
+    # infra/terraform/oidc.tf conditions AssumeRoleWithWebIdentity on
+    # `sub == repo:<repo>:environment:production`, single-valued and StringEquals, because a
+    # two-element array is an OR and that is premortem H4. Without this line the token's `sub`
+    # is `...:ref:refs/heads/main`, matches nothing, and every build fails at the credentials
+    # step. It is on the roll job for the same reason.
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      # A half-pushed set of five images is a roll that installs a mixture of two commits.
+      fail-fast: true
+      matrix:
+        include:
+          - name: backend
+            component: backend
+            dockerfile: backend/Dockerfile
+            suffix: ''
+          - name: frontend
+            component: frontend
+            dockerfile: frontend/Dockerfile
+            suffix: ''
+          # The reviewer console is the same repository at a different tag: one Dockerfile per
+          # entry point, both built from this SHA. roll.sh resolves it as `<sha>-reviewer`.
+          - name: reviewer
+            component: frontend
+            dockerfile: frontend/Dockerfile.reviewer
+            suffix: '-reviewer'
+          - name: monitoring
+            component: monitoring
+            dockerfile: monitoring/Dockerfile
+            suffix: ''
+          - name: rescorer
+            component: rescorer
+            dockerfile: rescorer/Dockerfile
+            suffix: ''
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          # The tree, not the trigger. `gh workflow run deploy.yml -f sha=<older>` must build
+          # THAT commit's code: ECR tags are immutable so a mismatched image push would fail,
+          # but the S3 deploy payload is not, and `deploy/<sha>/` would be silently overwritten
+          # with a different commit's roll.sh, compose files and MODEL_CARD.md.
+          ref: ${{ env.IMAGE_TAG }}
+          # The default writes the token into .git/config, where every later step can read it
+          # -- including a docker build that has the working tree as its context.
+          persist-credentials: false
+
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a  # v4.3.1
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # DELIV-3: this repository is public, so these logs are too. Mask the account id before
+      # anything can print an ECR URI, a role ARN or a bucket name -- all three end in it.
+      - name: Mask the account id
+        run: echo "::add-mask::$(aws sts get-caller-identity --query Account --output text)"
+
+      # The repository NAME comes from Parameter Store, never from a literal. Repositories are
+      # `<project>-<component>` and `project` is a Terraform variable: the plan for this phase
+      # assumed `toxic-<component>` while the applied account has `toxic-mod-<component>`, and
+      # every push would have gone somewhere that does not exist -- after building the image.
+      - name: Resolve this component's ECR repository
+        id: repo
+        run: |
+          set -euo pipefail
+          name="$(aws ssm get-parameter --name "/toxic/images/${{ matrix.component }}" \
+            --query 'Parameter.Value' --output text)"
+          [ -n "$name" ] && [ "$name" != "None" ] \
+            || { echo "::error::/toxic/images/${{ matrix.component }} is empty"; exit 1; }
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64  # v2.1.6
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3.12.0
+
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6.19.2
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          # Native: the runner is arm64 and the fleet is t4g Graviton, so nothing is emulated.
+          platforms: linux/arm64
+          push: true
+          # ECR renders a provenance attestation as a second, unknown/unknown-platform entry
+          # in the image index, which `docker compose` on the instance then tries to resolve.
+          provenance: false
+          tags: ${{ steps.ecr.outputs.registry }}/${{ steps.repo.outputs.name }}:${{ env.IMAGE_TAG }}${{ matrix.suffix }}
+
+  roll:
+    name: Roll containers and verify
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          ref: ${{ env.IMAGE_TAG }}
+          persist-credentials: false
+
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a  # v4.3.1
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Mask the account id
+        run: echo "::add-mask::$(aws sts get-caller-identity --query Account --output text)"
+
+      # What each instance installs. `deploy/current/` is what a REPLACED instance pulls on
+      # first boot, before any SendCommand can reach it, so both prefixes are written.
+      - name: Publish this SHA's deploy payload
+        run: |
+          set -euo pipefail
+          BUCKET="$(aws ssm get-parameter --name /toxic/deploy/bucket \
+            --query 'Parameter.Value' --output text)"
+          STAGE="$(mktemp -d)"
+          cp infra/deploy/instance/*.sh "$STAGE/"
+          cp infra/deploy/compose.*.yml "$STAGE/"
+          cp infra/deploy/toxic-stack.service "$STAGE/"
+          cp MODEL_CARD.md "$STAGE/"
+          aws s3 cp --recursive --sse AES256 "$STAGE" "s3://${BUCKET}/deploy/${IMAGE_TAG}/"
+          aws s3 cp --recursive --sse AES256 "$STAGE" "s3://${BUCKET}/deploy/current/"
+
+      # H5: send-command is fire-and-forget, and a --targets expression matching ZERO
+      # instances still returns a CommandId and exits 0. `ssm_run.sh` asserts the invocation
+      # count, polls every invocation to a terminal state, and fails on anything but Success.
+      #
+      # The component is passed as well as the SHA. Nothing on the running instances writes
+      # /etc/toxic/component -- the applied user data predates it -- and reading the Component
+      # tag would need an ec2:DescribeTags grant no role has, so roll.sh cannot infer it.
+      - name: Roll each component
+        run: |
+          set -euo pipefail
+          chmod +x infra/aws/*.sh
+          infra/aws/ssm_run.sh backend 1 bash /opt/toxic/bootstrap.sh "${IMAGE_TAG}" backend
+          infra/aws/ssm_run.sh frontend 1 bash /opt/toxic/bootstrap.sh "${IMAGE_TAG}" frontend
+          infra/aws/ssm_run.sh monitoring 1 bash /opt/toxic/bootstrap.sh "${IMAGE_TAG}" monitoring
+
+      # The real gate. Every invocation reporting Success is not a deploy: a container whose
+      # image pulled, started, and died in its lifespan reports Success too. Three answering
+      # endpoints are the deploy.
+      - name: Verify the live endpoints
+        run: infra/aws/verify_live.sh
+
+      # C8: only a verified deploy becomes the rollback baseline.
+      - name: Record the deployed SHA
+        run: infra/aws/record_deploy.sh "${IMAGE_TAG}"
