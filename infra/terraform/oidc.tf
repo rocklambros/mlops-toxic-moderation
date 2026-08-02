@@ -175,14 +175,32 @@ data "aws_iam_policy_document" "gha_deploy" {
     ]
   }
 
-  # The deploy job reads the endpoints and the bucket name from Parameter Store rather than
-  # running `terraform output` inside a world-readable Actions log. Read only: recording
-  # which SHA is serving is a separate, narrower grant added with that step.
+  # The deploy job reads the endpoints, the bucket name and the four ECR repository names from
+  # Parameter Store rather than running `terraform output` inside a world-readable Actions log.
   statement {
     sid       = "SsmReadTheDeployNamespace"
     effect    = "Allow"
     actions   = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"]
     resources = ["arn:aws:ssm:${var.region}:${local.account_id}:parameter/toxic/*"]
+  }
+
+  # The narrower write the read grant above promised, and nothing wider. `record_deploy.sh` is
+  # the LAST step of a successful deploy -- after five images are pushed, after the roll, after
+  # the health gate went green -- so a missing verb here fails at the single most expensive
+  # point in the pipeline and leaves the rollback pointer describing a SHA that is no longer
+  # serving.
+  #
+  # Two parameters, by full name rather than by prefix. /toxic/endpoints/* is what the health
+  # gate probes and /toxic/images/* is where every image push is aimed: a role that could
+  # rewrite either could redirect the gate at something it controls and report a green deploy.
+  statement {
+    sid     = "SsmRecordWhichShaIsServing"
+    effect  = "Allow"
+    actions = ["ssm:PutParameter"]
+    resources = [
+      "arn:aws:ssm:${var.region}:${local.account_id}:parameter/toxic/deploy/current-sha",
+      "arn:aws:ssm:${var.region}:${local.account_id}:parameter/toxic/deploy/previous-sha",
+    ]
   }
 
   # Second layer. The Allow set above is already narrow; this makes privilege

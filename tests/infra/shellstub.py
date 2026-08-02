@@ -36,6 +36,25 @@ REAL_TOOLS = (
 )
 
 
+def shell_code(path: Path) -> str:
+    """A shell script with its commentary removed, for the assertions that must read source.
+
+    Every script under `infra/` is more comment than code by design, and the comments name the
+    exact things the checks forbid: the paragraph explaining why nothing is recorded under
+    /toxic/boot/ contains the string `/toxic/boot/`, and the one explaining why there is no
+    localhost default contains `localhost`. A check that fires on its own rationale is a check
+    somebody deletes, so every source-reading assertion goes through here.
+
+    Whole-line comments only. A trailing `#` inside a string or a parameter expansion is not a
+    comment, and a scanner that guessed would be the thing this module exists to avoid.
+    """
+    return "\n".join(
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if not line.lstrip().startswith("#")
+    )
+
+
 def make_stub(bin_dir: Path, name: str, script: str) -> Path:
     """Write an executable stub named `name` into `bin_dir`."""
     bin_dir.mkdir(parents=True, exist_ok=True)
