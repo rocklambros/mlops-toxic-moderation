@@ -606,5 +606,5 @@ This block replaced a deliberate fail-closed sentinel (the SHA-256 of the string
 backend refused to start until a real model was promoted. Phase 1 has now promoted one.
 
 - MODEL_ARTIFACT: toxic-clf
-- MODEL_REGISTRY_VERSION: 0
-- MODEL_DIGEST: sha256:db678467907743fbce5d25ab8c9ad56cd0c89e053b46be81822dcb2095842454
+- MODEL_REGISTRY_VERSION: 1
+- MODEL_DIGEST: sha256:63d96d6da37dd6da3915048f729ca52b1ede5152434e4d0279bdd6b767fba5e4

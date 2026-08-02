@@ -25,8 +25,19 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'ro_user')
 
 -- Converge the attributes and the password on every run. This statement is what
 -- makes the document a rotation path as well as a bootstrap.
+--
+-- NOSUPERUSER and NOREPLICATION are deliberately absent. On RDS the master is not a
+-- superuser -- it holds rds_superuser, which may not alter the SUPERUSER attribute even
+-- to the value it already has -- so naming either one fails the whole statement with
+-- "permission denied to alter role ... Only roles with the SUPERUSER attribute may change
+-- the SUPERUSER attribute". Observed on 2026-08-01: CREATE ROLE above succeeded and this
+-- statement aborted, leaving monitor_ro existing with no password.
+--
+-- Nothing is lost by omitting them. CREATE ROLE above already sets both, RDS forbids any
+-- role from granting itself SUPERUSER or REPLICATION, and the attributes cannot drift
+-- because no principal in this account is able to change them.
 ALTER ROLE :"ro_user" WITH LOGIN PASSWORD :'ro_pass'
-  NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION;
+  NOCREATEDB NOCREATEROLE NOINHERIT;
 
 GRANT CONNECT ON DATABASE :"db_name" TO :"ro_user";
 GRANT USAGE ON SCHEMA public TO :"ro_user";

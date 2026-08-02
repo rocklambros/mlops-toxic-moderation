@@ -160,7 +160,7 @@ resource "aws_instance" "backend" {
     delete_on_termination = true
   }
 
-  user_data = templatefile("${path.module}/templates/user_data.sh.tftpl", {
+  user_data_base64 = base64gzip(templatefile("${path.module}/templates/user_data.sh.tftpl", {
     region       = var.region
     component    = "backend"
     log_group    = aws_cloudwatch_log_group.app["backend"].name
@@ -169,7 +169,7 @@ resource "aws_instance" "backend" {
     db_port      = aws_db_instance.main.port
     db_name      = aws_db_instance.main.db_name
     backend_url  = "http://127.0.0.1:8000"
-  })
+  }))
 
   # The SCP denies ec2:ModifyInstanceAttribute outright, so an in-place user_data
   # update is not an available operation; a change here is a deliberate
@@ -177,7 +177,7 @@ resource "aws_instance" "backend" {
   user_data_replace_on_change = false
 
   lifecycle {
-    ignore_changes = [ami, user_data]
+    ignore_changes = [ami, user_data, user_data_base64]
   }
 
   # ORDERING, NOT DECORATION. None of these is reachable through an attribute
@@ -254,7 +254,7 @@ resource "aws_instance" "frontend" {
     delete_on_termination = true
   }
 
-  user_data = templatefile("${path.module}/templates/user_data.sh.tftpl", {
+  user_data_base64 = base64gzip(templatefile("${path.module}/templates/user_data.sh.tftpl", {
     region       = var.region
     component    = "frontend"
     log_group    = aws_cloudwatch_log_group.app["frontend"].name
@@ -263,12 +263,12 @@ resource "aws_instance" "frontend" {
     db_port      = aws_db_instance.main.port
     db_name      = aws_db_instance.main.db_name
     backend_url  = local.backend_internal_url
-  })
+  }))
 
   user_data_replace_on_change = false
 
   lifecycle {
-    ignore_changes = [ami, user_data]
+    ignore_changes = [ami, user_data, user_data_base64]
   }
 
   # See the note on aws_instance.backend. This instance is in public_b, so it is
@@ -320,7 +320,7 @@ resource "aws_instance" "monitoring" {
     delete_on_termination = true
   }
 
-  user_data = templatefile("${path.module}/templates/user_data.sh.tftpl", {
+  user_data_base64 = base64gzip(templatefile("${path.module}/templates/user_data.sh.tftpl", {
     region       = var.region
     component    = "monitoring"
     log_group    = aws_cloudwatch_log_group.app["monitoring"].name
@@ -329,12 +329,12 @@ resource "aws_instance" "monitoring" {
     db_port      = aws_db_instance.main.port
     db_name      = aws_db_instance.main.db_name
     backend_url  = local.backend_internal_url
-  })
+  }))
 
   user_data_replace_on_change = false
 
   lifecycle {
-    ignore_changes = [ami, user_data]
+    ignore_changes = [ami, user_data, user_data_base64]
   }
 
   # See the note on aws_instance.backend. This instance shares public_a with the
