@@ -110,6 +110,12 @@ crash.*.log
 # apply to tracked files. Without this exception a rotated AMI silently fails to stage,
 # which is the same shape as the unanchored `data/` that hid ten modules for ten commits.
 !infra/terraform/ami.auto.tfvars
+# ...and the grading-window override, for the same reason: it is a reviewed decision about
+# how the stack runs, not an operator's local secret. It disarms the nightly stop so the
+# graded stack is up whenever the instructor looks at it. Uncommitted, it would be invisible
+# to review and absent from the runner, and the next apply would silently re-arm the
+# shutdown -- which is exactly the drift it was written to close.
+!infra/terraform/grading.auto.tfvars
 
 # RunPod launch registry: runtime state, not source. It records live pod ids so a crash
 # between "pod created" and "pod ready" still leaves something terminatable. Committing it
