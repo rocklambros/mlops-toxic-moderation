@@ -26,7 +26,7 @@ Every checkpoint date below is derived from that anchor: day 8 is 2026-08-06, da
 | Checkpoint | Evaluated or due | Condition | Decision | Items cut and why | Evidence |
 |---|---|---|---|---|---|
 | day-8 | 2026-08-01 | NOT MET | no cut | - | Evaluated five days early because the artifact it was waiting on landed early. Slice 1 **is** serving end to end on local compose: `infra/docker-compose.yml`, five graded containers healthy, traversal below |
-| day-11 | 2026-08-09 | PENDING | not due | - | `docs/evidence/a2-smoke-deploy.md` — written by Phase A2 Task 2 |
+| day-11 | 2026-08-02 | NOT MET | no cut | - | Evaluated seven days early because the risk became directly observable. The proxy it named never existed; `docs/evidence/p5-deploy-traversal.md` and `docs/evidence/p5-rollback-rehearsal.md` answer the same question better. See the adjudication below |
 
 ## Status at the time this log was created (2026-08-01, day 3, before Phase 3 Task 21)
 
@@ -99,7 +99,11 @@ Cutting item 3 today would therefore discard work that is already paid for and p
 recover schedule that is not under pressure. That is precisely the trailing-trigger mistake
 delivery spec §8 was corrected to avoid, in the other direction.
 
-**Why the day-11 row is still PENDING.** It is a *leading*
+**Why the day-11 row is still PENDING.** *(Superseded on 2026-08-02 by the day-11 adjudication
+at the end of this file. Left standing rather than edited, because it is the reasoning that was
+true on day 3 and rewriting it would make this log a summary instead of a record. What it got
+right: the row should not have been adjudicated on day 3. What overtook it: the deployed stack
+answered the question directly, seven days before the due date.)* It is a *leading*
 indicators: the whole correction in delivery spec §8 was to date them before the work they
 cancel, so that firing one recovers days. Day 8 is five days away. Adjudicating it today
 would mean either firing a schedule-risk trigger while the schedule still has five days to
@@ -154,3 +158,43 @@ must be revisited — the in-pod switch remains, but the lease no longer has an 
 
 Phase 1's training is complete and no further pods are scheduled; the only anticipated launch
 is a single int8 re-export (task #27).
+
+## Adjudication: day-11 (2026-08-02, seven days early)
+
+**Condition, from delivery spec §8:** "The day-9 throwaway smoke deploy has not succeeded."
+**Pre-committed action if MET:** Phase A2 falls back to console-provisioned EC2 and RDS in the
+member account; the Terraform is retained and submitted as evidence for rubric 5.2 rather than
+as the provisioning path.
+
+**Adjudicated NOT MET. No cut.**
+
+The literal proxy is unreadable and always will be: there was no day-9 throwaway smoke deploy.
+The schedule compressed and the first deploy of this stack was the real one, on 2026-08-01.
+`docs/evidence/a2-smoke-deploy.md` was never written and now never will be.
+
+An unreadable proxy is not the same as a negative reading, and this is the case the row would
+have got wrong if it were left to expire. Read literally, "the smoke deploy has not succeeded"
+is *true* — it never ran — which would fire the fallback and demote Terraform to a documentation
+artifact. That would be the exact opposite of what the evidence supports.
+
+What the indicator was actually measuring is whether Terraform can provision this stack, or
+whether the account would have to be clicked together by hand. That question is now answered
+directly rather than by proxy:
+
+- Terraform provisions **102 resources** and `terraform plan` reports *No changes. Your
+  infrastructure matches the configuration.*
+- All three tiers are serving, verified from outside the account:
+  `docs/evidence/p5-deploy-traversal.md`, 11 assertions, 11 passed.
+- The SSM roll has run 7 times across 2026-08-01 and 2026-08-02, in both directions:
+  `docs/evidence/p5-rollback-rehearsal.md`, 150 s back, 149 s forward, gated each time.
+
+The risk the checkpoint existed to catch did not materialise, so the fallback is not taken and
+nothing is cut. Terraform *is* the provisioning path, which is the stronger claim for rubric 5.2
+than retaining it as evidence would have been.
+
+**Why this is evaluated seven days early rather than left PENDING until 2026-08-09.** The same
+reason day-8 was: the artifact the indicator was waiting on has been overtaken. Leaving the row
+`PENDING` would mean the log claims the question is not yet answerable while the deployed system
+answers it, and `test_a_pending_checkpoint_is_still_in_the_future` would turn the suite red on
+2026-08-10 with no one left holding the context to adjudicate it properly. A leading indicator
+that is allowed to expire unread is a trailing indicator.

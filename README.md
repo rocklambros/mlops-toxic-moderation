@@ -235,6 +235,42 @@ timestamp is written by the operator tool. Every seeded row carries `predictions
 true` and every seeded review carries `reviewer_id = 'seed-replay'`, and the dashboard
 states how many of the displayed rows are seeded.
 
+### Seeding the deployed stack
+
+`make seed-demo` targets whatever `DATABASE_URL` and `BACKEND_URL` name, and against the
+deployed stack neither is reachable by default. Two things differ from a local run, and both
+are operator steps rather than code paths:
+
+**The database is private.** RDS is `PubliclyAccessible=false`, so the seeder reaches it
+through an SSM port-forward relayed by the backend instance. Nothing is opened to make this
+work — the same command is used by the traversal gate, and
+`docs/evidence/p5-deploy-traversal.md` gives it in full. Check that port 15432 is *listening*
+rather than that a `session-manager-plugin` process exists: SSM terminates the session on
+inactivity and the process outlives it briefly, so the process is not evidence of a usable
+tunnel.
+
+**The rate limit has to be raised for the window, and lowered afterwards.** Replaying ~2,000
+comments from one peer address trips `RATE_LIMIT_PER_MINUTE`, which defaults to 30. On the
+deployed stack the variable does **not** come from `infra/docker-compose.yml` — that is the
+local development file, and `infra/deploy/compose.backend.yml` does not mention it. The
+backend's environment comes wholesale from `/etc/toxic/backend.env` via `env_file`, so that
+is where it goes:
+
+```bash
+# on the backend instance, via SSM
+sed -i '/^RATE_LIMIT_/d' /etc/toxic/backend.env
+printf 'RATE_LIMIT_PER_MINUTE=4000\nRATE_LIMIT_BURST=4000\n' >> /etc/toxic/backend.env
+docker compose --env-file /etc/toxic/stack.env -f /opt/toxic/compose.yml up -d backend
+# ... seed ...
+sed -i '/^RATE_LIMIT_/d' /etc/toxic/backend.env     # and roll again
+```
+
+This is deliberately a visible operator action rather than a retry loop inside the seeder: an
+abuse control a tool quietly works around is not a control. `roll.sh` rewrites
+`/etc/toxic/backend.env` from Secrets Manager on every deploy, so an elevated limit cannot
+survive a rollout even if the restore step is forgotten — but restore it explicitly anyway,
+and confirm by observing 429s rather than by reading the file.
+
 Live accuracy is a Horvitz-Thompson estimate over two probability-sampled strata: every
 flagged item is reviewed, and a `RANDOM_AUDIT_RATE` fraction of the rest is audited. The
 inclusion probability is stored on each `review_queue` row at enqueue time, so the estimate
