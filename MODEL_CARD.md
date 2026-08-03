@@ -154,6 +154,49 @@ tuned on F-beta with beta > 1, which buys recall with precision deliberately.
 | `insult` | 0.28 | 1 | balanced |
 | `identity_hate` | 0.05 | 3 | targeted harm |
 
+### Decision policy — how a threshold becomes an action
+
+A threshold sets a per-label *flag*. What the service does with those flags is a separate
+policy, in `backend/policy.py`, and it is the thing a reader of this card actually needs in
+order to predict the system's behaviour:
+
+| decision | condition |
+|---|---|
+| `block` | any of `severe_toxic`, `threat`, `identity_hate` exceeds its threshold **by a further 0.15** |
+| `review` | any label is flagged, **or** any probability is within the review band below its threshold |
+| `allow` | none of the above |
+
+The review band's floor is `max(threshold − 0.10, threshold × 0.5)`. The second term is not
+decoration — it is a correction for a defect that made `allow` unreachable in production.
+
+**The defect.** The floor was `threshold − 0.10` alone. Three labels are tuned to 0.05, so
+their floors were **−0.05**; no probability is negative, so the review condition held for
+every input and the `allow` branch could not be reached by anything. Between the first deploy
+and 2026-08-02 the service therefore returned only `review` or `block`. A comment scoring
+`toxic = 0.00023` with all six flags false was sent to human review.
+
+**Why it matters beyond the wasted review capacity.** The random-audit stratum samples
+*allowed* traffic; it is what makes the live-accuracy estimate unbiased. A service that never
+allows anything produces an empty stratum, so the defect disabled the instrument that would
+have revealed it. It was caught by `scripts/seed_demo.py`'s exit criterion — *"the
+random-audit stratum is empty, so live accuracy stays biased"* — and not by any unit test,
+because `tests/unit/test_policy.py` ran against a uniform threshold of 0.50, where the floor
+is a comfortable 0.40 and the bug is invisible.
+
+**Effect of the fix.** For every threshold above 0.20 the floor is unchanged to the bit
+(`0.31 → 0.21`, not `0.155`). Only the three degenerate labels move, from a negative floor to
+`0.025`. Measured on 2,000 held-out comments replayed through the deployed service:
+
+| | before | after |
+|---|---|---|
+| flagged | 2000 (100 %) | 421 (21 %) |
+| sent to review | 2000 | 650 |
+| random-audit stratum | 0 | 229 |
+
+Anyone re-tuning these thresholds should note that the policy assumes a threshold materially
+larger than zero. `tests/unit/test_policy.py` asserts a zero-probability input is allowed at
+thresholds from 0.01 to 0.99, so a retune that reintroduces the condition fails the suite.
+
 ### Held-out test set — 31,877 comments, evaluated once
 
 | metric | value | 95 % CI |
@@ -537,9 +580,11 @@ genai-security-project completeness evaluator. The fields above cover its substa
 | | |
 |---|---|
 | Maintainer | Rock Lambros — `rock@rockcyber.com` |
-| Card version | 1.0.0 |
-| Card date | 2026-08-01 |
-| Model version described | `toxic-clf` v1.0.0 / W&B `toxic-clf:v0` @ `production` |
+| Card version | 1.1.0 |
+| Card date | 2026-08-02 |
+| Model version described | `toxic-clf` v1.0.0 / W&B `toxic-clf:v1` @ `production` |
+| Deployed at | `224da4149c4a`, three `t4g` instances in `us-west-2`; verified by `docs/evidence/p5-deploy-traversal.md` |
+| Changes since 1.0.0 | the decision policy is now documented, including the defect that made `allow` unreachable and its fix; `baseline_flag_rates.json` moved from a fail-closed sentinel to a real digest. No model weights, thresholds or metrics changed — the artifact digest of record is unchanged. |
 | Next review | on the next promotion to `production`, or on any change to `split_version`, whichever comes first |
 | Change log | git history of this file; the model's own history is the W&B collection version list |
 | Security contact | [`SECURITY.md`](SECURITY.md) |
@@ -558,20 +603,24 @@ change that no metric would flag — and `baseline_flag_rates.json` is the refer
 panel measures production against. Both are mounted read-only into a container that fails
 closed without them, so both are fetched and digest-verified exactly the way the model is.
 
-**`baseline_flag_rates.json` has not been produced.** Its row above is not a digest of a
-file: it is the SHA-256 of the sentence
+**`baseline_flag_rates.json` was produced on 2026-08-02** and its row above is now a real
+file digest — 659 bytes, computed from the exact bytes uploaded, because the file stamps
+`generated_at_utc` and is therefore not byte-reproducible.
 
-```
-PENDING PHASE 1 PROMOTION: baseline_flag_rates.json has not been produced
-```
+Until then this row carried a fail-closed sentinel: the SHA-256 of a sentence no artifact can
+match, so the monitoring instance's roll stopped with `digest mismatch on
+baseline_flag_rates.json` rather than starting a dashboard whose drift panel had nothing to
+drift from. That is the same device this section used for the model itself before Phase 1
+promoted one. Recording it here because a sentinel that is quietly replaced by a real digest
+leaves no trace that the artifact was ever missing, and the point of the sentinel is that the
+gap was visible.
 
-which no artifact can match — the same fail-closed sentinel this section carried for the
-model before Phase 1 promoted one. The monitoring instance's roll therefore stops with
-`digest mismatch on baseline_flag_rates.json` rather than starting a dashboard whose drift
-panel has nothing to drift from. Producing it needs the held-out probabilities in
-`artifacts/test_probabilities.npz` and `model.thresholds.compute_baseline_flag_rates`; it is
-**not** byte-reproducible (it stamps `generated_at_utc`), so the digest of record must be
-computed from the exact file that is uploaded, and this row replaced with it.
+Producing it surfaced a schema mismatch worth recording: the producer emitted `n_test` and no
+`schema_version`, while `monitoring.baseline.load_baseline` required `schema_version` and `n`.
+Both sides had tests, both passed, and neither had ever seen the other's output — the
+producer's tests asserted against its own fixture and the consumer's against a hand-written
+one. Reconciled in `model/thresholds.py`, and the file above was then loaded through the real
+consumer before its digest was recorded.
 
 The table is keyed on the **filename**, and it is read that way rather than by position.
 `infra/deploy/instance/fetch_artifacts.sh` looks each artifact up by its own name, because
