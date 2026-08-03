@@ -85,7 +85,9 @@ aws ssm start-session --target <backend-instance> \
   --document-name AWS-StartPortForwardingSessionToRemoteHost \
   --parameters '{"host":["<rds-endpoint>"],"portNumber":["5432"],"localPortNumber":["15432"]}' &
 
-export MONITORING_DB_DSN="postgresql+psycopg://monitor_ro:<secret>@127.0.0.1:15432/toxicmod"
+# built in the shell from Secrets Manager; never written out with the password inline,
+# which is also why this line is not a DSN -- tests/unit/test_redact.py rejects one.
+export MONITORING_DB_DSN="$(build_monitoring_dsn toxic-mod/db-readonly 127.0.0.1 15432 toxicmod)"
 export BACKEND_URL=$(aws ssm get-parameter --name /toxic/endpoints/backend --query Parameter.Value --output text)
 export FRONTEND_URL=$(aws ssm get-parameter --name /toxic/endpoints/frontend --query Parameter.Value --output text)
 export MONITORING_URL=$(aws ssm get-parameter --name /toxic/endpoints/monitoring --query Parameter.Value --output text)
