@@ -7,8 +7,10 @@ interface, a monitoring dashboard on its own server, and a CI gate that blocks m
 Six labels, independent, in this order: `toxic`, `severe_toxic`, `obscene`, `threat`,
 `insult`, `identity_hate`. Trained on the Jigsaw English toxic-comment corpus.
 
-- Experiment tracking: <https://wandb.ai/rocklambros/toxic-moderation>
-- Model registry (promoted stage visible): <https://wandb.ai/rocklambros/toxic-moderation/registry>
+- Experiment tracking (renders logged out):
+  <https://wandb.ai/rockcyber/mlops-toxic-moderation/reports/Toxic-comment-moderation---experiment-tracking--VmlldzoxNzY5OTgyOQ==>
+- Model registry, promoted stage visible (renders logged out):
+  <https://wandb.ai/rockcyber/mlops-toxic-moderation/artifacts/model/toxic-clf/v1>
 - Model card: [`MODEL_CARD.md`](MODEL_CARD.md) · Security policy: [`SECURITY.md`](SECURITY.md)
 - Design: [`docs/2026-07-01-toxic-moderation-mlops-design.md`](docs/2026-07-01-toxic-moderation-mlops-design.md)
 

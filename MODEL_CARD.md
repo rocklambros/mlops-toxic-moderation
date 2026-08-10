@@ -10,10 +10,12 @@ rounding an estimate into a claim.
 | | |
 |---|---|
 | **Artifact digest** | `sha256:63d96d6da37dd6da3915048f729ca52b1ede5152434e4d0279bdd6b767fba5e4` |
-| **Registry (public, logged-out)** | <https://wandb.ai/rockcyber-org/wandb-registry-model/artifacts/model/toxic-clf> |
+| **Registry, data public** | <https://wandb.ai/rockcyber-org/wandb-registry-model/artifacts/model/toxic-clf> — resolves anonymously over the API (`scripts/verify_public_registry.py`), but the **page does not render logged out**: the Registry UI needs an org context an anonymous visitor cannot resolve, and redirects to a 404 |
+| **Registry, renders logged out** | <https://wandb.ai/rockcyber/mlops-toxic-moderation/artifacts/model/toxic-clf/v1> — the project-scoped artifact view, showing the `production` alias |
 | **Promoted stage** | `production` (collection `toxic-clf`, version `v0`) |
-| **Training / evaluation run** | <https://wandb.ai/rockcyber/mlops-toxic-moderation/runs/dnvoc420> |
-| **Public project** | <https://wandb.ai/rockcyber/mlops-toxic-moderation> |
+| **Experiment tracking, renders logged out** | <https://wandb.ai/rockcyber/mlops-toxic-moderation/reports/Toxic-comment-moderation---experiment-tracking--VmlldzoxNzY5OTgyOQ==> |
+| **Training / evaluation run** | <https://wandb.ai/rockcyber/mlops-toxic-moderation/runs/dnvoc420> — public data, but the run page renders an empty workspace logged out; use the report above |
+| **Public project** | <https://wandb.ai/rockcyber/mlops-toxic-moderation> — `access: USER_READ`, 9 runs readable anonymously; the default Workspace tab is empty because no saved view exists |
 | **Held-out headline** | macro-F1 **0.5991** [0.5880, 0.6109] · macro PR-AUC **0.6632** [0.6471, 0.6853] |
 
 ---
