@@ -7,8 +7,10 @@ interface, a monitoring dashboard on its own server, and a CI gate that blocks m
 Six labels, independent, in this order: `toxic`, `severe_toxic`, `obscene`, `threat`,
 `insult`, `identity_hate`. Trained on the Jigsaw English toxic-comment corpus.
 
-- Experiment tracking: <https://wandb.ai/rocklambros/toxic-moderation>
-- Model registry (promoted stage visible): <https://wandb.ai/rocklambros/toxic-moderation/registry>
+- Experiment tracking (renders logged out):
+  <https://wandb.ai/rockcyber/mlops-toxic-moderation/reports/Toxic-comment-moderation---experiment-tracking--VmlldzoxNzY5OTgyOQ==>
+- Model registry, promoted stage visible (renders logged out):
+  <https://wandb.ai/rockcyber/mlops-toxic-moderation/artifacts/model/toxic-clf/v1>
 - Model card: [`MODEL_CARD.md`](MODEL_CARD.md) · Security policy: [`SECURITY.md`](SECURITY.md)
 - Design: [`docs/2026-07-01-toxic-moderation-mlops-design.md`](docs/2026-07-01-toxic-moderation-mlops-design.md)
 
@@ -32,14 +34,34 @@ single source of truth for which port is which, and a test holds the Terraform t
 
 ## Availability window
 
-The stack is stopped between sessions to stay inside a `$100`/month budget, so the public
-URLs answer only while it is up.
+**Live continuously, and reachable from the internet since 2026-08-10.** The stack has run
+without interruption since 2026-08-02. Two separate things had to be true for the URLs above
+to answer, and only one of them was: the instances were up the whole time, but ingress was
+restricted to the operator's own address until 2026-08-10, so anyone else got a connection
+timeout rather than a page. `infra/terraform/demo.auto.tfvars` opened the three graded
+listeners to `0.0.0.0/0` on that date.
 
-**Live for grading: 2026-08-14 through 2026-08-18, 09:00–21:00 US/Mountain (UTC-6).**
+The window has **no scheduled close**. It ends when the operator deletes that file and
+re-applies, after grading; the stack is destroyed at the same time. `docs/tls-decision.md`
+records what that open-ended exposure costs — these are cleartext HTTP listeners — and why
+it is accepted here. Port 8503, the reviewer console, is not part of it and has no ingress
+rule on any security group.
 
-Outside that window the Elastic IPs are still allocated and the addresses in this README
-stay correct, but nothing listens on them. Email `rock@rockcyber.com` for a window outside
-these hours and the stack comes up in about six minutes.
+An earlier version of this section said the stack was stopped between sessions and named a
+2026-08-14 through 2026-08-18 grading window. That was the plan; it is not what happened.
+Continuous operation is scenario B in `docs/cost-model.md` — "nightly stop disabled and
+forgotten for the whole project", priced there at **`$62.48`** against a `$100` ceiling.
+Measured spend through 2026-08-10 is `$24.03`, tracking that scenario. It is the more
+expensive choice and it is the deliberate one, because it removes the failure mode where a
+grader arrives outside a window and finds nothing listening.
+
+The scenario to stay off is C, everything left running for a **full billing month**, which
+the same document prices at `$99.65` — at the ceiling, not under it. Destroying the stack
+on 2026-08-18 is what keeps this project in B rather than C.
+
+After 2026-08-18 the stack is destroyed. The Elastic IPs stay allocated, so the addresses
+in this README remain correct, but nothing listens on them. Email `rock@rockcyber.com` and
+the stack comes back up in about six minutes.
 
 ## Setup
 

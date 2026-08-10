@@ -72,7 +72,35 @@ from monitoring.stats import AccuracyReport
 # Seven daily buckets is the floor below which "latency over time" is a scatter plot of one
 # afternoon. `scripts/seed_demo.py` enforces the same number from the other side.
 MIN_BUCKETS = 7
-DEFAULT_WINDOW_DAYS = 14
+
+# Below this many requests in a day, `percentile_cont(0.5)` is reporting one or two
+# measurements rather than a level. The chart still plots the point -- hiding real data is
+# worse -- but the caption says which days are thin.
+MIN_SAMPLES_PER_BUCKET = 20
+
+# The dashboard shows ALL history by default, and bounds only the drift comparison.
+#
+# It used to bound everything with one 14-day `since` threaded into all seven queries. Only
+# one of them needs a bound. Drift is a comparison of a *recent* production distribution
+# against a fixed baseline, so without a window old data dilutes the signal forever and
+# "drift started" becomes undetectable. The other six are either time series whose x-axis
+# already carries recency, or totals that a reader expects to be project-wide.
+#
+# Bounding them anyway had a failure mode that is not theoretical: every prediction in this
+# project was made between 2026-07-27 and 2026-08-02, so on 2026-08-17 a 14-day window
+# contained zero rows and every panel rendered empty, with no error and nothing to say the
+# data still existed. A dashboard whose contents depend on the hour someone opens it is
+# reporting the window, not the system.
+#
+# `DASHBOARD_WINDOW_DAYS` still narrows everything when an operator wants "the last N days";
+# unset, empty, `all`, or `0` mean all of it.
+DEFAULT_WINDOW_DAYS: int | None = None
+DEFAULT_DRIFT_WINDOW_DAYS = 14
+
+# Older than any row this system can hold, so `ts >= :since` is a no-op rather than a
+# separate un-filtered query. Keeping one SQL string per question is worth more than saving
+# a comparison the planner discards anyway.
+BEGINNING_OF_TIME = dt.datetime(1970, 1, 1, tzinfo=dt.UTC)
 DEFAULT_BASELINE_PATH = Path("artifacts/baseline_flag_rates.json")
 DEFAULT_THRESHOLDS_PATH = Path("artifacts/thresholds.json")
 
@@ -87,8 +115,28 @@ REFERENCE_UNAVAILABLE = (
 )
 
 
-def window_days() -> int:
-    return int(os.environ.get("DASHBOARD_WINDOW_DAYS", DEFAULT_WINDOW_DAYS))
+def window_days() -> int | None:
+    """Days of history for every panel except drift. `None` means all of it.
+
+    Unset, empty, `all` and `0` all mean all-time, because those are the four things an
+    operator types when they mean "stop hiding data from me".
+    """
+    raw = os.environ.get("DASHBOARD_WINDOW_DAYS")
+    if raw is None:
+        return DEFAULT_WINDOW_DAYS
+    raw = raw.strip().lower()
+    if raw in {"", "all", "0"}:
+        return None
+    return int(raw)
+
+
+def drift_window_days() -> int:
+    """Days of production traffic compared against the fixed baseline.
+
+    This one is load-bearing and is never unbounded: PSI against an all-time production
+    distribution cannot tell you that drift *started*.
+    """
+    return int(os.environ.get("DRIFT_WINDOW_DAYS", DEFAULT_DRIFT_WINDOW_DAYS))
 
 
 def configured_alert_psi() -> float:
@@ -116,7 +164,7 @@ class Snapshot:
     against an implicit zero.
     """
 
-    window_days: int
+    window_days: int | None
     total: int
     seeded: int
     statuses: dict[str, int]
@@ -124,6 +172,7 @@ class Snapshot:
     latency: list[LatencyBucket]
     accuracy: AccuracyReport
     panel: UserPanel
+    drift_window_days: int = DEFAULT_DRIFT_WINDOW_DAYS
     drift: list[DriftRow] | None = None
     flags: object | None = None
     reference_error: str | None = None
@@ -171,13 +220,36 @@ def accuracy_metric(point: float) -> str:
     return f"{float(point):.1%}"
 
 
-def latency_caption(n_buckets: int) -> str:
+def latency_caption(n_buckets: int, sample_counts: list[int] | None = None) -> str:
+    """Say how many requests each point stands for, not just how many points there are.
+
+    The old caption counted buckets and stopped. Seven buckets of one request each passed
+    that check and rendered as a trend line, which is how a single cold-start request after
+    eight idle days read as a 5x latency regression. The bucket count answers "is there
+    enough history"; the sample counts answer "is any of it worth believing", and only the
+    second one catches that failure.
+    """
     if int(n_buckets) < MIN_BUCKETS:
         return (
             f"Not enough history: {int(n_buckets)} daily bucket(s), {MIN_BUCKETS} required "
             "before this chart shows a trend. Run `make seed-demo`."
         )
-    return f"{int(n_buckets)} daily buckets. The two lines are p50 and p95 latency."
+    head = (
+        f"{int(n_buckets)} daily buckets. Each point is one day's p50 or p95; points are "
+        "not joined, because days with no traffic are gaps rather than a straight line "
+        "between the days either side of them."
+    )
+    if not sample_counts:
+        return head
+    lo, hi = min(sample_counts), max(sample_counts)
+    thin = sum(1 for n in sample_counts if n < MIN_SAMPLES_PER_BUCKET)
+    detail = f" Requests per day: min {int(lo)}, max {int(hi)}."
+    if thin:
+        detail += (
+            f" {thin} day(s) carry fewer than {MIN_SAMPLES_PER_BUCKET} requests, so their "
+            "percentiles are close to single measurements and should not be read as a level."
+        )
+    return head + detail
 
 
 def drift_caption(alerting: list[str], alert_psi: float | None = None) -> str:
@@ -202,8 +274,14 @@ def user_caption(panel: UserPanel) -> str:
 
 def window_caption(data: "Snapshot") -> str:
     """The provenance line. Every value is an integer or a hex digest computed here."""
+    scope = (
+        "Window: all history"
+        if data.window_days is None
+        else f"Window: last {int(data.window_days)} days"
+    )
     return (
-        f"Window: last {int(data.window_days)} days. {int(data.total)} predictions, of which "
+        f"{scope}; drift is compared over the last {int(data.drift_window_days)} days. "
+        f"{int(data.total)} predictions, of which "
         f"{int(data.seeded)} are replayed held-out Jigsaw comments from `make seed-demo`. "
         f"Queue: {int(data.statuses.get('pending', 0))} pending, "
         f"{int(data.statuses.get('rescored', 0))} rescored, "
@@ -251,17 +329,32 @@ def load_reference() -> Reference:
         return Reference(error=type(exc).__name__, digest=_digest(thresholds_path()))
 
 
-def collect(conn, reference: Reference, now: dt.datetime, days: int, psi_alert: float) -> Snapshot:
-    since = now - dt.timedelta(days=days)
+def collect(
+    conn,
+    reference: Reference,
+    now: dt.datetime,
+    days: int | None,
+    psi_alert: float,
+    drift_days: int = DEFAULT_DRIFT_WINDOW_DAYS,
+) -> Snapshot:
+    """Two windows, because the panels ask two different questions.
+
+    `days` bounds description -- what has this system done. `None` means all of it.
+    `drift_days` bounds comparison -- is recent traffic unlike the baseline. That one is
+    always bounded, whatever `days` says, or PSI silently answers a different question.
+    """
+    since = BEGINNING_OF_TIME if days is None else now - dt.timedelta(days=days)
+    drift_since = now - dt.timedelta(days=drift_days)
     total, seeded = seeded_share(conn, since)
     drift = flags = None
     if reference.thresholds is not None and reference.baseline is not None:
         drift = drift_report(
-            conn, since, reference.thresholds, reference.baseline, alert_psi=psi_alert
+            conn, drift_since, reference.thresholds, reference.baseline, alert_psi=psi_alert
         )
         flags = flag_rate_series(conn, since, reference.thresholds)
     return Snapshot(
         window_days=days,
+        drift_window_days=drift_days,
         total=total,
         seeded=seeded,
         statuses=review_counts(conn, since),
@@ -294,12 +387,20 @@ def render(data: Snapshot) -> None:
     if data.latency:
         frame = pd.DataFrame(
             [
-                {"day": bucket.bucket, "p50 (ms)": bucket.p50, "p95 (ms)": bucket.p95}
+                {
+                    "day": bucket.bucket,
+                    "p50 (ms)": bucket.p50,
+                    "p95 (ms)": bucket.p95,
+                    "requests": int(bucket.n),
+                }
                 for bucket in data.latency
             ]
         )
-        st.line_chart(frame, x="day", y=["p50 (ms)", "p95 (ms)"])
-    st.caption(latency_caption(len(data.latency)))
+        # Points, not a line. A line interpolates across days that have no traffic, which
+        # invents a trend out of two distant measurements; sizing by request count then says
+        # which points are worth reading.
+        st.scatter_chart(frame, x="day", y=["p50 (ms)", "p95 (ms)"], size="requests")
+    st.caption(latency_caption(len(data.latency), [int(b.n) for b in data.latency]))
 
     st.header("2. Predicted class distribution (target drift)")
     if data.drift:
@@ -396,7 +497,14 @@ def main() -> None:
     days = window_days()
     engine = create_engine(os.environ["MONITORING_DB_DSN"], future=True, pool_pre_ping=True)
     with engine.connect() as conn:
-        data = collect(conn, reference, dt.datetime.now(dt.UTC), days, configured_alert_psi())
+        data = collect(
+            conn,
+            reference,
+            dt.datetime.now(dt.UTC),
+            days,
+            configured_alert_psi(),
+            drift_window_days(),
+        )
     render(data)
 
 
