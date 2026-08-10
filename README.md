@@ -32,8 +32,18 @@ single source of truth for which port is which, and a test holds the Terraform t
 
 ## Availability window
 
-**Live continuously through 2026-08-18, then destroyed.** The stack has run without
-interruption since 2026-08-02, so the public URLs below answer at any hour until then.
+**Live continuously, and reachable from the internet since 2026-08-10.** The stack has run
+without interruption since 2026-08-02. Two separate things had to be true for the URLs above
+to answer, and only one of them was: the instances were up the whole time, but ingress was
+restricted to the operator's own address until 2026-08-10, so anyone else got a connection
+timeout rather than a page. `infra/terraform/demo.auto.tfvars` opened the three graded
+listeners to `0.0.0.0/0` on that date.
+
+The window has **no scheduled close**. It ends when the operator deletes that file and
+re-applies, after grading; the stack is destroyed at the same time. `docs/tls-decision.md`
+records what that open-ended exposure costs — these are cleartext HTTP listeners — and why
+it is accepted here. Port 8503, the reviewer console, is not part of it and has no ingress
+rule on any security group.
 
 An earlier version of this section said the stack was stopped between sessions and named a
 2026-08-14 through 2026-08-18 grading window. That was the plan; it is not what happened.

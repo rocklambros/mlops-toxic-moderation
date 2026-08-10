@@ -116,6 +116,12 @@ crash.*.log
 # to review and absent from the runner, and the next apply would silently re-arm the
 # shutdown -- which is exactly the drift it was written to close.
 !infra/terraform/grading.auto.tfvars
+# ...and the public demo window, for the third time and the same reason. It opens the three
+# graded listeners to the internet so a grader can reach them. It carries no secret -- the
+# value is literally 0.0.0.0/0 -- while the operator's own address stays in the gitignored
+# tfvars where it belongs. Uncommitted, the next apply would silently re-close the listeners
+# and the README's live URLs would start timing out with no error anywhere.
+!infra/terraform/demo.auto.tfvars
 
 # RunPod launch registry: runtime state, not source. It records live pod ids so a crash
 # between "pod created" and "pod ready" still leaves something terminatable. Committing it
