@@ -127,3 +127,7 @@ crash.*.log
 # between "pod created" and "pod ready" still leaves something terminatable. Committing it
 # would ship one machine's live pods to every other clone.
 infra/runpod/runpod_pods.json
+
+# Playwright MCP scratch output: browser snapshots and console logs from screenshot runs.
+# The screenshots that matter are moved into docs/evidence/screenshots/ deliberately.
+.playwright-mcp/
