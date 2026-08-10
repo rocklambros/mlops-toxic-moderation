@@ -1,0 +1,275 @@
+# The four submission deliverables and the evidence for each.
+#
+# Every URL below was opened in a logged-out browser -- a fresh context with no W&B session,
+# no GitHub session, and no ~/.netrc -- on the date recorded. That distinction is the whole
+# point of this file. Four of the six W&B pages this project cited were reachable to the
+# author and broken to everyone else, and no amount of checking while signed in would have
+# found it. `scripts/verify_submission.py` re-runs the offline half; the online half is
+# `tests/integration/test_submission_logged_out.py`.
+#
+# NO RAW ELASTIC IP APPEARS IN THIS FILE. `README.md` refers to the live endpoints as
+# `<eip-1..3>` so that a public repository does not advertise three cleartext HTTP listeners
+# to everything that crawls GitHub, and this file keeps that promise. It would also fail its
+# own redaction scan: `scripts/redact.py` allowlists only private and reserved ranges, so a
+# public address here is a finding. The real addresses live in SSM Parameter Store and in the
+# Canvas submission, and `url_parameter` below says exactly which parameter to read.
+
+deliverables:
+
+  repository:
+    url: https://github.com/rocklambros/mlops-toxic-moderation
+    verified_logged_out: true
+    verified_on: 2026-08-10
+    notes: >-
+      Public. Checked that the Actions tab, the workflow run logs and the Security tab are
+      reachable without a session, not merely that the code browses -- a public repository
+      can still have private Actions logs, and the CI evidence is the deliverable.
+
+  wandb:
+    # DELIV-2. The URL a grader is given must RENDER, not merely resolve. wandb.ai is a
+    # single-page app: it returns 200 with the same shell for a project that does not exist,
+    # for one that is private, and for one that is public but has no saved workspace view.
+    # All three look identical to curl, and this project hit the third.
+    url: https://wandb.ai/rockcyber/mlops-toxic-moderation/reports/Toxic-comment-moderation---experiment-tracking--VmlldzoxNzY5OTgyOQ==
+    url_kind: report
+    registry_url: https://wandb.ai/rockcyber/mlops-toxic-moderation/artifacts/model/toxic-clf/v1
+    promoted_stage: production
+    project_url: https://wandb.ai/rockcyber/mlops-toxic-moderation
+    project_access: USER_READ
+    runs_visible_anonymously: 9
+    verified_logged_out: true
+    verified_on: 2026-08-10
+    notes: >-
+      The data was public throughout: the project is USER_READ and
+      scripts/verify_public_registry.py returns PUBLIC AND PROMOTED over the anonymous
+      GraphQL API. What failed was rendering. The project's default Workspace tab showed
+      "No workspace yet" to a logged-out visitor because no saved view existed, /runs
+      redirected back to it, and the Registry UI needs an org context an anonymous visitor
+      cannot resolve. A Report renders standalone, so it is the experiment-tracking URL; the
+      project-scoped artifact view renders the production alias, so it is the registry URL.
+      Evidence of the failure is kept, not just of the fix: see the wandb-* screenshots.
+
+  screenshots:
+    url: https://github.com/rocklambros/mlops-toxic-moderation/tree/main/docs/evidence/screenshots
+    verified_logged_out: true
+    verified_on: 2026-08-10
+    redaction_method: >-
+      Solid fill, never blur. Blur is reversible on low-entropy strings, and a 12-digit
+      account id and a dotted quad are both low-entropy. Account ids were additionally
+      masked in the DOM before capture where the page allowed it, so the identifier never
+      entered the image at all.
+    items:
+      - id: aws-console-three-ec2-and-rds
+        path: docs/evidence/screenshots/aws-console-three-ec2-and-rds.png
+        redacted_account_id: true
+        contains_raw_user_text: false
+        shows: >-
+          EC2 Instances filtered to the project: three instances Running, t4g.medium
+          backend, t4g.small frontend, t4g.medium monitoring, 3/3 status checks each, across
+          us-west-2a and us-west-2b. Below it, RDS Databases showing toxic-mod-pg Available
+          on PostgreSQL. Instance ids and the Public IPv4 DNS column are filled over.
+        captured_via: >-
+          A federated console session minted from the operator's existing Identity Center
+          credentials via the AWS sign-in federation endpoint, rather than an interactive
+          console login. No static credential was created to take a screenshot.
+
+      - id: live-prototype-on-ec2
+        path: docs/evidence/screenshots/live-prototype-on-ec2.png
+        redacted_account_id: true
+        contains_raw_user_text: false
+        shows: >-
+          The deployed Streamlit interface with a comment submitted and a decision rendered:
+          REVIEW at max probability 0.998, with all six per-label calibrated probabilities
+          and their flag states.
+        note: >-
+          contains_raw_user_text is false in the sense that matters: the text shown is a
+          synthetic insult typed by the operator for this capture, not a third party's
+          submission drawn from the database.
+
+      - id: monitoring-dashboard-populated
+        path: docs/evidence/screenshots/monitoring-dashboard-populated.png
+        redacted_account_id: true
+        contains_raw_user_text: false
+        prediction_count: 2033
+        time_buckets: 15
+        reviewed_items: 650
+        shows: >-
+          The monitoring dashboard reading the production database: latency over time as
+          points sized by request count, predicted class distribution against the pinned
+          baseline, and the review queue counts.
+
+      - id: monitoring-dashboard-before-window-fix
+        path: docs/evidence/screenshots/monitoring-dashboard-before-window-fix.png
+        redacted_account_id: true
+        contains_raw_user_text: false
+        shows: >-
+          The same dashboard before 2026-08-10, kept as evidence of a defect rather than
+          deleted. A 14-day window hid more than half the data (959 of 2033 predictions),
+          and a line chart interpolated across seven days with no traffic to a single
+          cold-start request, rendering a flat 17 ms p50 as a 5x upward ramp.
+
+      - id: blocked-merge
+        path: docs/evidence/screenshots/blocked-merge.png
+        redacted_account_id: true
+        contains_raw_user_text: false
+        shows: >-
+          Pull request #15, opened deliberately with a failing test, closed without merging.
+          The machine-readable record of the refusal is docs/evidence/ci-gate.md and the
+          blocked-merge-*.txt transcripts, which capture mergeStateStatus BLOCKED from the
+          API and the CLI refusal including --admin.
+
+      - id: wandb-registry-promoted-stage
+        path: docs/evidence/screenshots/wandb-registry-promoted-stage.png
+        redacted_account_id: true
+        contains_raw_user_text: false
+        shows: >-
+          The toxic-clf collection in a logged-out browser, with versions v0 and v1 and the
+          aliases compacted, latest and production visible on v1.
+
+      - id: wandb-experiment-tracking-logged-out
+        path: docs/evidence/screenshots/wandb-experiment-tracking-logged-out.png
+        redacted_account_id: true
+        contains_raw_user_text: false
+        shows: The published Report rendering all nine runs and their configs, logged out.
+
+      - id: wandb-workspace-empty-logged-out
+        path: docs/evidence/screenshots/wandb-workspace-empty-logged-out.png
+        redacted_account_id: true
+        contains_raw_user_text: false
+        shows: >-
+          What a grader saw before the fix: "No workspace yet" over a public project with
+          nine readable runs. Kept because the failure is the interesting part.
+
+      - id: wandb-readme-url-404-logged-out
+        path: docs/evidence/screenshots/wandb-readme-url-404-logged-out.png
+        redacted_account_id: true
+        contains_raw_user_text: false
+        shows: >-
+          The URL README.md carried until 2026-08-10, returning 404. The entity
+          `rocklambros` does not exist; runs live under `rockcyber`.
+
+      - id: wandb-registry-ui-404-logged-out
+        path: docs/evidence/screenshots/wandb-registry-ui-404-logged-out.png
+        redacted_account_id: true
+        contains_raw_user_text: false
+        shows: >-
+          The org-scoped Registry URL the model card labelled "public, logged-out",
+          returning 404 when actually logged out.
+
+      - id: wandb-run-page-empty-logged-out
+        path: docs/evidence/screenshots/wandb-run-page-empty-logged-out.png
+        redacted_account_id: true
+        contains_raw_user_text: false
+        shows: The training run page falling back to the same empty workspace shell.
+
+  live_url:
+    # Placeholder by design; see the header. `url_parameter` is the resolvable form.
+    url: http://<eip-2>:8501
+    url_parameter: /toxic/endpoints/frontend
+    health_url: http://<eip-1>:8000/health
+    health_url_parameter: /toxic/endpoints/backend
+    verified_logged_out: true
+    verified_on: 2026-08-10
+    availability_window: >-
+      Continuously live since 2026-08-02, and reachable from the public internet since
+      2026-08-10, when infra/terraform/demo.auto.tfvars opened the three graded listeners to
+      0.0.0.0/0. No scheduled close: the operator deletes that file and re-applies after
+      grading. tests/unit/test_demo_window.py goes red on 2026-09-15 as a backstop so an
+      open-ended exposure cannot become a permanent one by being forgotten.
+    transport: >-
+      Cleartext HTTP by decision, with the residual risk written down in
+      docs/tls-decision.md, which was re-opened on 2026-08-10 because an open-ended window
+      is a materially larger risk than the few supervised hours the original acceptance
+      assumed.
+    survives_stop_start:
+      status: unverified
+      claim: >-
+        The stack returns to health after the instances and RDS are stopped and started.
+      why_unverified: >-
+        No stop/start cycle has been run against the deployed stack. docs/evidence/
+        p5-rollback-rehearsal.md rehearses the SHA rollback and says in its own words that
+        its health check "only proves the containers restarted", which is a different and
+        weaker claim. infra/deploy/toxic-stack.service brings the stack up at boot and
+        `make aws-up` gates on three live health endpoints, so the mechanism exists and is
+        tested in unit form -- but the cycle itself has not been performed end to end, so
+        this is recorded as unverified rather than asserted.
+      how_to_verify: make aws-down && make aws-up && make deploy-verify
+      partial_evidence:
+        - tests/infra/test_aws_up.py
+        - tests/unit/test_systemd_unit.py
+        - docs/evidence/p5-rollback-rehearsal.md
+
+# H15 / H13. The compensating controls that docs/tls-decision.md and MODEL_CARD.md write
+# their accepted risks as resting on. docs/post-demo-closure.md is the procedure,
+# scripts/close_demo.sh runs it, tests/unit/test_post_demo_closure.py is the tripwire.
+#
+# The tripwire keys off infra/terraform/demo.auto.tfvars rather than off these values, so
+# this block cannot certify itself: claiming closure while that file exists is red, and
+# deleting that file without updating this block is also red.
+post_demo_controls:
+
+  demo_cidrs_closed:
+    satisfied: false
+    status: open by decision
+    owner: Rock Lambros
+    blocked_by: >-
+      The demo window is deliberately open with no scheduled close, so a grader can reach
+      the live stack at any hour. infra/terraform/demo.auto.tfvars opens 8000, 8501 and 8502
+      to 0.0.0.0/0. Closing it before grading would defeat the deliverable it exists for.
+    due: 2026-09-15
+    due_rationale: >-
+      Not a plan to close on that date -- the operator closes it on request after grading.
+      It is the same backstop tests/unit/test_demo_window.py uses, so both go red together
+      and neither can quietly cover for the other.
+    how_to_verify: >-
+      aws ec2 describe-security-groups --filters Name=group-name,Values=toxic-mod-frontend
+      --query "SecurityGroups[].IpPermissions[].IpRanges[?CidrIp=='0.0.0.0/0']" -- expect empty
+    how_to_close: bash scripts/close_demo.sh
+    risk_while_open: docs/tls-decision.md, re-opened and re-accepted on 2026-08-10
+
+  reviewer_shared_secret_rotated:
+    satisfied: false
+    status: pending the window closing
+    owner: Rock Lambros
+    due: 2026-09-15
+    note: >-
+      The reviewer secret never crossed a cleartext listener: port 8503 has no ingress rule
+      on any security group, verified live on 2026-08-10, and that structural control is
+      what docs/tls-decision.md's acceptance actually rests on. It is rotated anyway,
+      because rotating only the secret you are certain leaked is how you find out you were
+      wrong about which one leaked.
+    how_to_verify: >-
+      aws secretsmanager describe-secret --secret-id toxic-mod/reviewer-shared-secret
+      --query LastChangedDate -- expect a timestamp after the window closed
+    how_to_close: bash scripts/close_demo.sh
+
+  demo_api_key_rotated:
+    satisfied: false
+    status: pending the window closing
+    owner: Rock Lambros
+    due: 2026-09-15
+    note: >-
+      This one did cross a cleartext listener, every time /predict was called during the
+      demo window. It is the reason the pair is rotated together.
+    how_to_verify: >-
+      aws secretsmanager describe-secret --secret-id toxic-mod/demo-api-key
+      --query LastChangedDate -- expect a timestamp after the window closed
+    how_to_close: bash scripts/close_demo.sh
+
+  rate_limit_active:
+    satisfied: true
+    status: in force
+    owner: Rock Lambros
+    verified_on: 2026-08-10
+    note: >-
+      Not a post-demo task. This control is what stands between an internet-facing cleartext
+      /predict and an unmetered one, so it is load-bearing precisely while the window is
+      open. MODEL_CARD.md names it among the controls that remain in force after white-box
+      evasion is accepted.
+    how_to_verify: >-
+      PYTHONHASHSEED=0 .venv/bin/pytest tests/integration/test_predict_abuse_controls.py
+    evidence:
+      - backend/ratelimit.py
+      - backend/config.py
+      - tests/integration/test_predict_abuse_controls.py
+      - tests/integration/test_deployed_traversal.py

@@ -1,0 +1,77 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-08-10T11:39:56Z",
+    "component": {
+      "type": "application",
+      "name": "mlops-toxic-moderation",
+      "version": "d8f52eb2082f7847f75b10610dfeb0e24e990580"
+    }
+  },
+  "components": [
+    {
+      "type": "machine-learning-model",
+      "name": "toxic-clf",
+      "version": "v0",
+      "description": "TF-IDF word 1-2 plus char_wb 3-5 into a OneVsRest calibrated logistic regression, six independent labels.",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "63d96d6da37dd6da3915048f729ca52b1ede5152434e4d0279bdd6b767fba5e4"
+        }
+      ],
+      "properties": [
+        {
+          "name": "serialization",
+          "value": "skops, loaded against a static trusted-type allowlist"
+        },
+        {
+          "name": "registry",
+          "value": "https://wandb.ai/rockcyber-org/wandb-registry-model/artifacts/model/toxic-clf"
+        },
+        {
+          "name": "registry-entity",
+          "value": "rockcyber-org"
+        },
+        {
+          "name": "run-entity",
+          "value": "rockcyber"
+        },
+        {
+          "name": "promoted-stage",
+          "value": "production"
+        },
+        {
+          "name": "model-card",
+          "value": "MODEL_CARD.md"
+        },
+        {
+          "name": "digest-of-record",
+          "value": "the block in the git-committed MODEL_CARD.md; MODEL_DIGEST is a cross-check the loader refuses to load past on mismatch"
+        }
+      ]
+    },
+    {
+      "type": "data",
+      "name": "jigsaw-toxic-comment-classification",
+      "version": "414a45a29f73bed6632dd966e13c64d7196cfd9d5799e8a76a9ecbe40e9294c3",
+      "description": "Jigsaw Toxic Comment Classification Challenge, English, six labels. Splits are derived from it and are not redistributed here.",
+      "properties": [
+        {
+          "name": "license",
+          "value": "per the Kaggle competition terms; not redistributed here"
+        },
+        {
+          "name": "composite-data-version",
+          "value": "414a45a29f73bed6632dd966e13c64d7196cfd9d5799e8a76a9ecbe40e9294c3"
+        },
+        {
+          "name": "provenance",
+          "value": "docs/data-provenance.md"
+        }
+      ]
+    }
+  ]
+}

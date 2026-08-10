@@ -262,3 +262,27 @@ gitleaks-checksums:
 	  https://github.com/gitleaks/gitleaks/releases/download/v$(GITLEAKS_VERSION)/gitleaks_$(GITLEAKS_VERSION)_checksums.txt \
 	  | grep -E 'linux_(arm64|x64)\.tar\.gz$$' > scripts/gitleaks.sha256
 	@cat scripts/gitleaks.sha256
+
+# SEVERABLE -- cut-line item 1. Nothing depends on these targets, and nothing may: no gate
+# target lists them as a prerequisite, no workflow reads their output, and no application
+# code opens it. tests/unit/test_sbom_severability.py asserts all four of those properties,
+# so that cutting the SBOM stays a one-commit deletion rather than a refactor.
+#
+# Generated from requirements/serve.txt, which is already pip-compiled --generate-hashes, so
+# there is no tool to install and no unhashed install to justify.
+.PHONY: sbom aibom
+sbom aibom:
+	$(BIN)/python scripts/make_sbom.py
+
+# H15/H13. Close the public demo window and rotate the two secrets that were reachable
+# while it was open. Not a gate target and nothing depends on it: it is an operator action
+# with real consequences, and docs/post-demo-closure.md is the procedure it implements.
+.PHONY: close-demo
+close-demo:
+	bash scripts/close_demo.sh
+
+# The offline half of the submission check. The online half needs the network and lives in
+# tests/integration/test_submission_logged_out.py, which strips credentials properly.
+.PHONY: submission-check
+submission-check:
+	$(BIN)/python scripts/verify_submission.py
