@@ -55,13 +55,14 @@ report success until all three health endpoints answer.
 
 ## What is not finished
 
-Three things, all recorded rather than hidden. `docs/rubric-conformance.md` carries the same
+Two things, all recorded rather than hidden. `docs/rubric-conformance.md` carries the same
 list at the bottom of the self-grade.
 
-1. **`survives_stop_start` is unverified.** No stop/start cycle has been run against the
-   deployed stack. The rollback rehearsal proves the containers restart, which is a weaker
-   claim. Close it with `make aws-down && make aws-up && make deploy-verify`, then set the
-   entry in `docs/submission-manifest.yml`.
+1. ~~`survives_stop_start` is unverified.~~ **Done, 2026-08-10.** The full cycle ran and
+   the stack came back healthy with the data intact: `docs/evidence/p5-stop-start-cycle.md`.
+   Note that `make aws-up` prints a missing-boot-marker warning on the current fleet. That is
+   expected and explained in the evidence document; it disappears on any instance that is
+   replaced.
 2. **The demo window is open with no scheduled close.** `tests/unit/test_demo_window.py`
    goes red on 2026-09-15 as a backstop. Close it with `make close-demo`, which also rotates
    the reviewer secret and the demo API key, then records nothing — you do that in the

@@ -102,11 +102,46 @@ def test_aws_up_waits_for_rds_to_be_available_not_merely_started(tmp_path):
 
 def test_aws_up_waits_for_the_boot_marker_before_it_rolls(tmp_path):
     """H26. Rolling into a host whose user data has not finished fails for the wrong reason and
-    wastes the first ten minutes of every debugging session."""
-    bin_dir, env, _journal_path = _harness(tmp_path, STUB_NO_BOOT_MARKER="1")
+    wastes the first ten minutes of every debugging session.
+
+    With no marker AND no answering endpoint, there is no evidence the host is ready, so this
+    must still be fatal."""
+    bin_dir, env, _journal_path = _harness(tmp_path, verify=FAIL, STUB_NO_BOOT_MARKER="1")
     result = run(SCRIPT, [], bin_dir, env=env)
     assert result.returncode != 0
     assert "boot marker" in result.stderr
+
+
+def test_a_missing_boot_marker_is_not_fatal_when_the_component_is_already_serving(tmp_path):
+    """Measured against the live fleet on 2026-08-10: `make aws-up` could not succeed at all.
+
+    The marker is a PROXY for "did this host's bootstrap reach the end". The script's own
+    comment assumes it "is already present from the first boot", and on this fleet it is not:
+    `compute.tf` sets `user_data_replace_on_change = false` and puts `user_data` under
+    `ignore_changes`, deliberately, because the SCP denies `ec2:ModifyInstanceAttribute`. So
+    when the marker was added to the template, Terraform correctly changed nothing on the
+    running instances, and `/toxic/boot/*` has never existed. The gate could never pass, and
+    it is the gate in the documented recovery command.
+
+    When the endpoint answers, the question the marker asks is already answered, and answered
+    more directly: a host that is serving HTTP finished booting. So this falls back to the
+    stronger evidence rather than blocking on the weaker proxy -- and says so, loudly, because
+    a silent fallback is how the marker quietly stops meaning anything.
+    """
+    bin_dir, env, _journal_path = _harness(tmp_path, STUB_NO_BOOT_MARKER="1")
+    result = run(SCRIPT, [], bin_dir, env=env)
+    assert result.returncode == 0, result.stderr
+    combined = result.stdout + result.stderr
+    assert "boot marker" in combined, "the fallback must not be silent"
+    assert "already serving" in combined, combined
+
+
+def test_the_fallback_still_rolls_the_stack_rather_than_skipping_ahead(tmp_path):
+    """Falling back on readiness must not also skip the work that follows it."""
+    bin_dir, env, _journal_path = _harness(tmp_path, STUB_NO_BOOT_MARKER="1")
+    result = run(SCRIPT, [], bin_dir, env=env)
+    assert result.returncode == 0, result.stderr
+    assert "verify_live.sh" in result.stdout, "the health gate was skipped"
 
 
 def test_aws_up_explicitly_starts_the_stack_unit_on_every_component(tmp_path):

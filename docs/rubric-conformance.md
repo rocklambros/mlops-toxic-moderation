@@ -83,8 +83,12 @@ enforces that, and a PARTIAL with no written justification also fails the suite.
 Three things are outside the rubric but would be dishonest to omit from a document that
 claims to grade the system:
 
-1. **`survives_stop_start` is unverified.** No stop/start cycle has been run against the
-   deployed stack. Recorded with a procedure in `docs/submission-manifest.yml`.
+1. ~~`survives_stop_start` is unverified.~~ **Verified 2026-08-10**: full stop, RDS to
+   `stopped`, endpoints refusing, then back to three healthy endpoints with 2033 predictions
+   intact and the Elastic IPs unmoved. `docs/evidence/p5-stop-start-cycle.md`. The cycle
+   found two real defects on the way, both fixed: the dump's verification could not complete
+   and could not have detected a truncated archive, and `make aws-up` could never succeed on
+   this fleet.
 2. **The demo window is open with no scheduled close**, so the graded listeners serve
    cleartext HTTP to the internet until someone closes them. `docs/tls-decision.md` accepts
    this and `docs/post-demo-closure.md` owns closing it.
