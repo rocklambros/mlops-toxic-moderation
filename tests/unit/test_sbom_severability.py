@@ -143,9 +143,29 @@ def test_the_aibom_records_the_data_version_the_card_records():
     assert composite.group(1) in AIBOM.read_text(encoding="utf-8")
 
 
-def test_regenerating_on_the_same_commit_produces_the_same_bytes():
+def test_regeneration_is_deterministic():
     """A wall-clock timestamp would make every regeneration a diff, and a diff nobody can
-    explain is a diff nobody reviews. The stamp is the HEAD commit date."""
-    before = SBOM.read_bytes(), AIBOM.read_bytes()
+    explain is a diff nobody reviews. The stamp is the HEAD commit date instead.
+
+    This runs the generator twice and compares the two outputs, rather than comparing the
+    committed file against a fresh run. The committed artifact records the commit it was
+    generated *for*, and that commit's SHA does not exist until after the commit is made --
+    so an SBOM can never contain the hash of the commit that carries it. Asserting otherwise
+    produces a test that goes red on the next unrelated commit, which is how a determinism
+    check turns into noise everyone learns to ignore.
+    """
     subprocess.run(["python", "scripts/make_sbom.py"], check=True, capture_output=True)
-    assert (SBOM.read_bytes(), AIBOM.read_bytes()) == before, "generation is not deterministic"
+    first = SBOM.read_bytes(), AIBOM.read_bytes()
+    subprocess.run(["python", "scripts/make_sbom.py"], check=True, capture_output=True)
+    assert (SBOM.read_bytes(), AIBOM.read_bytes()) == first, "generation is not deterministic"
+
+
+def test_the_recorded_commit_is_a_real_commit_in_this_history():
+    """The artifacts legitimately lag HEAD. What must stay true is that the commit they name
+    exists, so 'which tree does this SBOM describe' always has an answer."""
+    recorded = json.loads(SBOM.read_text(encoding="utf-8"))["metadata"]["component"]["version"]
+    assert re.fullmatch(r"[0-9a-f]{40}", recorded), recorded
+    found = subprocess.run(
+        ["git", "cat-file", "-e", f"{recorded}^{{commit}}"], capture_output=True, check=False
+    )
+    assert found.returncode == 0, f"sbom.json names {recorded[:12]}, which is not a commit here"
