@@ -3,11 +3,11 @@
   "specVersion": "1.6",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-08-10T10:56:42Z",
+    "timestamp": "2026-08-10T11:20:39Z",
     "component": {
       "type": "application",
       "name": "mlops-toxic-moderation",
-      "version": "7550b384ba21ea2fa9aa6945ce9a5c112b9609ae"
+      "version": "4a828063dfa001f45807c282e11883f0cee3d877"
     }
   },
   "components": [

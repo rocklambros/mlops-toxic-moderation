@@ -4,7 +4,7 @@
 
 **Goal:** Build, deploy, and operate a production-grade multi-label toxic comment moderation system on AWS, with experiment tracking, a model registry, a served API, a human-review feedback loop, monitoring, and a CI/CD gate.
 
-**Architecture:** Build-time and runtime are separate. RunPod trains the classical model and fine-tunes DistilBERT on ephemeral GPU pods, then registers both to Weights & Biases. The running system lives entirely in one AWS account: EC2 #1 serves FastAPI `/predict` `/health` (classical model, CPU) plus the Streamlit user and reviewer UI; EC2 #2 runs the monitoring dashboard and the DistilBERT async re-scorer worker; RDS Postgres holds shared state. W&B is a deploy-time source only, never in the request path.
+**Architecture:** Build-time and runtime are separate. RunPod trains the classical model and fine-tunes DistilBERT on ephemeral GPU pods, then registers both to Weights & Biases. The running system lives entirely in one AWS account: EC2 #1 serves FastAPI `/predict` `/health` (classical model, CPU); EC2 #2 runs the Streamlit user interface and the operator-only reviewer console on 8503; EC2 #3 runs the monitoring dashboard and the DistilBERT async re-scorer worker; RDS Postgres holds shared state. W&B is a deploy-time source only, never in the request path.
 
 **Tech Stack:** Python 3.11, scikit-learn + skops, iterative-stratification, pandas/numpy/scipy, transformers + torch (build-time GPU only), onnxruntime + optimum (ONNX int8), FastAPI + uvicorn + pydantic, Streamlit, SQLAlchemy + Postgres, Weights & Biases, pytest + ruff + gitleaks + semgrep, Docker + docker-compose, GitHub Actions, RunPod (build-time), CycloneDX (AIBOM/SBOM).
 
@@ -14,7 +14,7 @@ Every task inherits these. Values are copied verbatim from the design spec (`doc
 
 - **Labels (ordered, single source of truth):** `toxic`, `severe_toxic`, `obscene`, `threat`, `insult`, `identity_hate`.
 - **Runtime is 100% AWS, zero RunPod dependence.** The running system never calls RunPod. RunPod is build-time GPU only.
-- **Two registered models.** Classical TF-IDF (word 1-2 grams plus char 3-5 grams) One-vs-Rest LogisticRegression with `class_weight='balanced'` is the online Production model on CPU. DistilBERT, exported to ONNX with int8 dynamic quantization, is the async challenger that re-scores the human-review queue on EC2 #2 CPU. Both emit the same six-label vector.
+- **Two registered models.** Classical TF-IDF (word 1-2 grams plus char 3-5 grams) One-vs-Rest LogisticRegression with `class_weight='balanced'` is the online Production model on CPU. DistilBERT, exported to ONNX with int8 dynamic quantization, is the async challenger that re-scores the human-review queue on EC2 #3 CPU. Both emit the same six-label vector.
 - **W&B is registry plus tracking, fetched at deploy time only.** Verify SHA-256 against the model card, bake the artifact into the image or a local volume. Never fetch W&B in the runtime request path.
 - **Leakage / overfitting firewall (hard requirement).** Near-duplicate dedup before any split. Lock a 15% held-out test set at the start with a fixed seed and iterative multi-label stratification; touch it exactly once, at the very end. Remaining data into stratified CV folds where all six labels (including `threat` under 0.3%) appear in every fold. Fit TF-IDF vocabulary and IDF inside the sklearn Pipeline inside each CV fold. Tune thresholds on validation only, never on the held-out test. DistilBERT uses early stopping on validation, weight decay, dropout, 2-3 epochs, and logs the train/val loss gap every epoch. Seed hygiene and git SHA logged to W&B for every run.
 - **Safe model loading only.** Classical via skops (`skops.io.dump` / `skops.io.load` with a trusted allowlist). DistilBERT via safetensors and ONNX. Never pickle or joblib. Pin the exact W&B artifact digest and verify SHA-256 before loading. Fail closed on mismatch.
@@ -64,7 +64,7 @@ mlops-toxic-moderation/
     dashboard.py          # Streamlit, reads RDS (Phase 3)
     Dockerfile
   rescorer/
-    worker.py             # EC2 #2 worker, ONNX DistilBERT, polls RDS (Phase 3)
+    worker.py             # EC2 #3 worker, ONNX DistilBERT, polls RDS (Phase 3)
     Dockerfile
   infra/
     docker-compose.yml    # local full stack (Phase 5)
@@ -293,7 +293,7 @@ Phase 3 owns its own writers, listed above. They need reviewer session identity 
 status semantics that do not exist in Phase 2; the tables they write are defined here. Phase 2
 must not be read as providing them.
 
-**W&B artifact naming.** Classical artifact `toxic-clf`, DistilBERT artifact `toxic-distilbert`. Versions `:vN`. The pinned digest travels as `@sha256:...` in the model card and the deploy env var `MODEL_DIGEST`.
+**W&B artifact naming.** Classical artifact `toxic-clf`, DistilBERT artifact `toxic-distilbert`. Versions `:vN`. The digest of record is the block in the git-committed `MODEL_CARD.md`. The deploy environment variable `MODEL_DIGEST` is a cross-check the loader compares against the card, and the loader fails closed on any mismatch.
 
 ## Phase Dependency Graph
 
@@ -328,7 +328,7 @@ Each phase produces a working, testable increment and lands on its own feature b
 1. Console, one time, four operations: enable IAM Identity Center in the management account with home region `us-west-2`, create the directory user, create an `AdministratorAccess` permission set, assign it to the management account. Then `aws configure sso`. Verify with `aws sts get-caller-identity`.
 2. `infra/aws/scp-sandbox-guardrails.json`: region lock on `aws:RequestedRegion`, deny `iam:CreateUser` and `iam:CreateAccessKey`, Graviton instance-type allowlist plus GPU and metal denial via `ec2:InstanceType` **scoped to `Resource: "arn:aws:ec2:*:*:instance/*"`**, deny `rds:CreateDBCluster`, require `rds:ManageMasterUserPassword` and deny `rds:PubliclyAccessible` on `rds:CreateDBInstance`, deny leaving the org, deny CloudTrail and GuardDuty tampering. **Do not attempt an RDS class cap with `rds:DatabaseClass`.** It is unsupported on `CreateDBInstance` and would deny all RDS creation. See spec section 5.1 for both traps. Validate the JSON before attaching.
 3. `infra/aws/bootstrap.sh`: idempotent, ten ordered steps per spec section 6, which names every verified CLI operation. **The script never calls `iam enable-organizations-root-credentials-management` and never deletes a root credential.** Root is break-glass and stays, per spec section 5.2. Step 7 is an operator step that establishes the break-glass: root password recovery, strong password, MFA enrolled, no access keys. Every org-level write the script performs is scoped to the new `Sandbox` OU, so no existing account changes posture.
-4. `infra/terraform/`: VPC with two public and two private subnets and no NAT gateway, security groups with no port 22, both EC2 instances with IMDSv2 required, RDS Postgres 16 with `manage_master_user_password = true`, four ECR repositories, instance profiles, the `gha-ci` and `gha-deploy` OIDC roles, CloudTrail, GuardDuty, CloudWatch log groups at 14-day retention, and the $100 budget with alerts at 50, 80, and 100 percent.
+4. `infra/terraform/`: VPC with two public and two private subnets and no NAT gateway, security groups with no port 22, all three EC2 instances with IMDSv2 required, RDS Postgres 16 with `manage_master_user_password = true`, four ECR repositories, instance profiles, the `gha-ci` and `gha-deploy` OIDC roles, CloudTrail, GuardDuty, CloudWatch log groups at 14-day retention, and the $100 budget with alerts at 50, 80, and 100 percent.
 5. `.github/workflows/deploy.yml`: build four arm64 images on `ubuntu-24.04-arm`, tag by git SHA, push to ECR, `terraform apply`, roll containers through SSM Run Command. Gated by the `production` environment with required review.
 6. Seed Secrets Manager by CLI with the W&B API key and the reviewer shared secret. No secret value enters Terraform state or the repository.
 7. `Makefile` targets `aws-up` and `aws-down` that start and stop EC2 and RDS between sessions. Document that a stopped RDS instance restarts automatically after seven days.
@@ -482,27 +482,28 @@ Each phase produces a working, testable increment and lands on its own feature b
 
 ---
 
-## Phase 5: Docker, two-EC2 deploy, README, model card, AIBOM
+## Phase 5: Docker, three-EC2 deploy, README, model card, AIBOM
 
 **Deliverable:** One arm64 Docker image per component in ECR, a docker-compose local full stack, a working `deploy.yml` that builds, pushes, applies, and rolls containers through SSM Run Command onto the Phase A instances, deploy-time model artifact fetch by digest (verify SHA-256, bake), and the finished operator docs: `README.md`, `MODEL_CARD.md`, CycloneDX `aibom.json`, an `input_text` retention purge job, a rollback plan, and the mandatory `SECURITY.md` VDP.
 
-**Branch:** `feat/phase-5-deploy-docs`. **Needs:** Phase A complete (account, VPC, EC2, RDS, ECR, OIDC roles), all component images, W&B digests, measured ONNX int8 throughput (drives the EC2 #2 sizing confirmation).
+**Branch:** `feat/phase-5-deploy-docs`. **Needs:** Phase A complete (account, VPC, EC2, RDS, ECR, OIDC roles), all component images, W&B digests, measured ONNX int8 throughput (drives the EC2 #3 sizing confirmation, and only if the challenger survives the cut-line).
 
-**Files:** `infra/docker-compose.yml`, `.github/workflows/deploy.yml`, `infra/aws/fetch_artifacts.sh` (deploy-time digest-verified fetch), finalized `MODEL_CARD.md`, `aibom.json`, `README.md`, `SECURITY.md`, `infra/ROLLBACK.md`.
+**Files (as built):** `infra/docker-compose.yml`, `infra/deploy/compose.{backend,frontend,monitoring}.yml`, `infra/deploy/toxic-stack.service`, `infra/deploy/instance/roll.sh`, `.github/workflows/deploy.yml`, `infra/aws/{aws_up,aws_down,verify_deploy,verify_live,rollback,db_dump,db_restore}.sh`, `infra/terraform/deploy.tf`, `scripts/make_sbom.py`, `scripts/verify_submission.py`, `scripts/close_demo.sh`, finalized `MODEL_CARD.md`, `sbom.json`, `aibom.json`, `README.md`, `SECURITY.md`, `infra/ROLLBACK.md`, `docs/tls-decision.md`, `docs/runbooks/no-ssh-debug.md`, `docs/post-demo-closure.md`, `docs/rubric-conformance.md`, `docs/submission-manifest.yml`.
 
 **Tasks:**
 1. `infra/docker-compose.yml`: backend, frontend, monitoring, rescorer, postgres with mounted/baked artifacts + env.
-2. Deployment on the Phase A infrastructure: `deploy.yml` builds four arm64 images on `ubuntu-24.04-arm`, tags by git SHA, pushes to ECR through `gha-deploy`, runs `terraform apply`, and rolls containers through SSM Run Command with no SSH. `infra/aws/fetch_artifacts.sh` fetches the W&B artifact by digest, verifies SHA-256, and bakes it. Confirm or resize the EC2 #2 instance class from the measured ONNX throughput, staying inside the SCP allowlist.
+2. Deployment on the Phase A infrastructure: `deploy.yml` builds four arm64 images on `ubuntu-24.04-arm`, tags by git SHA, pushes to ECR through `gha-deploy`, runs `terraform apply`, and rolls containers through SSM Run Command with no SSH. `infra/aws/fetch_artifacts.sh` fetches the W&B artifact by digest, verifies SHA-256, and bakes it. Confirm or resize the **EC2 #3** instance class, and only if the challenger survives the cut-line, from the measured ONNX throughput and staying inside the SCP allowlist.
 3. Finalize `MODEL_CARD.md` + generate CycloneDX `aibom.json`, verify it scores 100% on the AIBOM evaluator. (`writing-model-cards`.)
 4. `README.md` operator guide: architecture, run locally, deploy, endpoints, input_text retention policy, reviewer auth note, cost governance. (`writing-repo-documentation`.)
 5. `input_text` retention purge: a scheduled job (cron or a small container) that nulls `predictions.input_text` older than `INPUT_TEXT_RETENTION_DAYS` (default 30), keeping the rest of the row for monitoring. Note it in the model card and README.
 6. Dependency SBOM. (`generating-sbom`.)
-7. Rollback plan. (`building-rollback-plan`; optional `building-canary-rollout`.)
-8. `SECURITY.md` VDP + coordinated disclosure. Mandatory, the repo is public. Written in Phase A, reviewed here. (`writing-vdp-and-coordinated-disclosure`.)
+7. `SECURITY.md` VDP + coordinated disclosure. Mandatory, the repo is public. Written in Phase A, reviewed here. Delivered as a claim/status/evidence table rather than nine present-tense assertions. (`writing-vdp-and-coordinated-disclosure`.)
+
+**Rollback runbook (never cut).** `infra/ROLLBACK.md` plus `infra/aws/rollback.sh`, which re-rolls `/toxic/deploy/previous-sha` without touching Terraform. Rehearsed once while the system works, and recorded in `docs/evidence/p5-rollback-rehearsal.md`. It is not a deliverable, it is the capability that saves the deliverables, so cutting it removes recovery at exactly the moment recovery is needed.
 
 **Test strategy:** `docker compose up` runs the full stack locally and serves a `/predict` end to end. Deploy scripts validated against a throwaway EC2 + RDS. AIBOM verified by the evaluator.
 
-**Exit criteria:** local compose serves the full stack; deploy scripts stand up both EC2 + RDS and serve; artifacts verified by digest at deploy; README + model card + AIBOM + SECURITY + rollback complete.
+**Exit criteria:** local compose serves the full stack; the deploy workflow rolls all **three** instances, each gated on a live `/health` check; artifacts verified by digest at deploy; README + model card + AIBOM + SECURITY + rollback complete.
 
 **Enforcement skills:** `writing-model-cards`, `generating-sbom`, `writing-repo-documentation`, `writing-vdp-and-coordinated-disclosure`, `packaging-model-for-deployment`, `building-rollback-plan`.
 
@@ -572,7 +573,7 @@ Recommendation. All Graviton (arm64) to match the aarch64 Jetson build box and t
 
 RDS config: Postgres 16, 20 GB gp3 (minimum, cheap), Single-AZ (no Multi-AZ for a class project, it halves the cost), `us-west-2`, private subnets, `manage_master_user_password = true` so the password lives in Secrets Manager rather than Terraform state.
 
-**Cost control matters more than instance class here.** Stop both EC2 instances and the RDS instance between work sessions and run them only during development and the demo. Approximate `us-west-2` on-demand rates (verify in the AWS Pricing Calculator, do not treat as exact): EC2 #1 around $0.034/hr, EC2 #2 around $0.067/hr, RDS around $0.016/hr, so roughly $0.12/hr with everything on. Left running continuously that approaches the $100 monthly ceiling. Run only during sessions and it stays in single-digit dollars. gp3 and the 20 GB RDS volume persist at cents/month when stopped.
+**Cost control matters more than instance class here.** Stop all three EC2 instances and the RDS instance between work sessions and run them only during development and the demo. Approximate `us-west-2` on-demand rates (verify in the AWS Pricing Calculator, do not treat as exact): EC2 #1 around $0.034/hr, EC2 #2 around $0.067/hr, RDS around $0.016/hr, so roughly $0.12/hr with everything on. Left running continuously that approaches the $100 monthly ceiling. Run only during sessions and it stays in single-digit dollars. gp3 and the 20 GB RDS volume persist at cents/month when stopped.
 
 Controls, strongest first: the SCP instance-type allowlist is a hard denial, `terraform destroy` is the full teardown, `make aws-down` and `make aws-up` stop and start between sessions, and budget alerts fire at 50, 80, and 100 percent of $100. There is no automated stop action, by owner decision.
 

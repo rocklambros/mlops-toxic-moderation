@@ -280,3 +280,9 @@ sbom aibom:
 .PHONY: close-demo
 close-demo:
 	bash scripts/close_demo.sh
+
+# The offline half of the submission check. The online half needs the network and lives in
+# tests/integration/test_submission_logged_out.py, which strips credentials properly.
+.PHONY: submission-check
+submission-check:
+	$(BIN)/python scripts/verify_submission.py
