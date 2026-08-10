@@ -114,7 +114,7 @@ curl -X POST "http://<eip-1>:8000/predict" \
 ```json
 {
   "request_id": "0f3c1a6e-2b5d-4a71-9f0e-6c2a4d8b1e37",
-  "model_version": "toxic-clf:v3",
+  "model_version": "toxic-clf:v1",
   "labels": {
     "toxic":         {"prob": 0.02, "flag": false},
     "severe_toxic":  {"prob": 0.00, "flag": false},
@@ -141,7 +141,7 @@ curl -X POST "http://<eip-1>:8000/predict" \
 ```json
 {
   "request_id": "b81d0c44-7a90-4de2-8c19-5f7b3e2a90cc",
-  "model_version": "toxic-clf:v3",
+  "model_version": "toxic-clf:v1",
   "labels": {
     "toxic":         {"prob": 0.94, "flag": true},
     "severe_toxic":  {"prob": 0.11, "flag": false},
@@ -185,7 +185,7 @@ curl -sS "http://<eip-1>:8000/health"
 ```json
 {
   "status": "ok",
-  "model_version": "toxic-clf:v3",
+  "model_version": "toxic-clf:v1",
   "database": "ok",
   "spool_depth": 0,
   "rejected": {"unauthenticated": 0, "rate_limited": 0, "oversize": 0}
