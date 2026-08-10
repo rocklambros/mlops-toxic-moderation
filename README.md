@@ -32,14 +32,24 @@ single source of truth for which port is which, and a test holds the Terraform t
 
 ## Availability window
 
-The stack is stopped between sessions to stay inside a `$100`/month budget, so the public
-URLs answer only while it is up.
+**Live continuously through 2026-08-18, then destroyed.** The stack has run without
+interruption since 2026-08-02, so the public URLs below answer at any hour until then.
 
-**Live for grading: 2026-08-14 through 2026-08-18, 09:00–21:00 US/Mountain (UTC-6).**
+An earlier version of this section said the stack was stopped between sessions and named a
+2026-08-14 through 2026-08-18 grading window. That was the plan; it is not what happened.
+Continuous operation is scenario B in `docs/cost-model.md` — "nightly stop disabled and
+forgotten for the whole project", priced there at **`$62.48`** against a `$100` ceiling.
+Measured spend through 2026-08-10 is `$24.03`, tracking that scenario. It is the more
+expensive choice and it is the deliberate one, because it removes the failure mode where a
+grader arrives outside a window and finds nothing listening.
 
-Outside that window the Elastic IPs are still allocated and the addresses in this README
-stay correct, but nothing listens on them. Email `rock@rockcyber.com` for a window outside
-these hours and the stack comes up in about six minutes.
+The scenario to stay off is C, everything left running for a **full billing month**, which
+the same document prices at `$99.65` — at the ceiling, not under it. Destroying the stack
+on 2026-08-18 is what keeps this project in B rather than C.
+
+After 2026-08-18 the stack is destroyed. The Elastic IPs stay allocated, so the addresses
+in this README remain correct, but nothing listens on them. Email `rock@rockcyber.com` and
+the stack comes back up in about six minutes.
 
 ## Setup
 
