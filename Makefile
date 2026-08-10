@@ -273,3 +273,10 @@ gitleaks-checksums:
 .PHONY: sbom aibom
 sbom aibom:
 	$(BIN)/python scripts/make_sbom.py
+
+# H15/H13. Close the public demo window and rotate the two secrets that were reachable
+# while it was open. Not a gate target and nothing depends on it: it is an operator action
+# with real consequences, and docs/post-demo-closure.md is the procedure it implements.
+.PHONY: close-demo
+close-demo:
+	bash scripts/close_demo.sh

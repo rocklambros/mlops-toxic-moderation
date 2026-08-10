@@ -198,3 +198,78 @@ deliverables:
         - tests/infra/test_aws_up.py
         - tests/unit/test_systemd_unit.py
         - docs/evidence/p5-rollback-rehearsal.md
+
+# H15 / H13. The compensating controls that docs/tls-decision.md and MODEL_CARD.md write
+# their accepted risks as resting on. docs/post-demo-closure.md is the procedure,
+# scripts/close_demo.sh runs it, tests/unit/test_post_demo_closure.py is the tripwire.
+#
+# The tripwire keys off infra/terraform/demo.auto.tfvars rather than off these values, so
+# this block cannot certify itself: claiming closure while that file exists is red, and
+# deleting that file without updating this block is also red.
+post_demo_controls:
+
+  demo_cidrs_closed:
+    satisfied: false
+    status: open by decision
+    owner: Rock Lambros
+    blocked_by: >-
+      The demo window is deliberately open with no scheduled close, so a grader can reach
+      the live stack at any hour. infra/terraform/demo.auto.tfvars opens 8000, 8501 and 8502
+      to 0.0.0.0/0. Closing it before grading would defeat the deliverable it exists for.
+    due: 2026-09-15
+    due_rationale: >-
+      Not a plan to close on that date -- the operator closes it on request after grading.
+      It is the same backstop tests/unit/test_demo_window.py uses, so both go red together
+      and neither can quietly cover for the other.
+    how_to_verify: >-
+      aws ec2 describe-security-groups --filters Name=group-name,Values=toxic-mod-frontend
+      --query "SecurityGroups[].IpPermissions[].IpRanges[?CidrIp=='0.0.0.0/0']" -- expect empty
+    how_to_close: bash scripts/close_demo.sh
+    risk_while_open: docs/tls-decision.md, re-opened and re-accepted on 2026-08-10
+
+  reviewer_shared_secret_rotated:
+    satisfied: false
+    status: pending the window closing
+    owner: Rock Lambros
+    due: 2026-09-15
+    note: >-
+      The reviewer secret never crossed a cleartext listener: port 8503 has no ingress rule
+      on any security group, verified live on 2026-08-10, and that structural control is
+      what docs/tls-decision.md's acceptance actually rests on. It is rotated anyway,
+      because rotating only the secret you are certain leaked is how you find out you were
+      wrong about which one leaked.
+    how_to_verify: >-
+      aws secretsmanager describe-secret --secret-id toxic-mod/reviewer-shared-secret
+      --query LastChangedDate -- expect a timestamp after the window closed
+    how_to_close: bash scripts/close_demo.sh
+
+  demo_api_key_rotated:
+    satisfied: false
+    status: pending the window closing
+    owner: Rock Lambros
+    due: 2026-09-15
+    note: >-
+      This one did cross a cleartext listener, every time /predict was called during the
+      demo window. It is the reason the pair is rotated together.
+    how_to_verify: >-
+      aws secretsmanager describe-secret --secret-id toxic-mod/demo-api-key
+      --query LastChangedDate -- expect a timestamp after the window closed
+    how_to_close: bash scripts/close_demo.sh
+
+  rate_limit_active:
+    satisfied: true
+    status: in force
+    owner: Rock Lambros
+    verified_on: 2026-08-10
+    note: >-
+      Not a post-demo task. This control is what stands between an internet-facing cleartext
+      /predict and an unmetered one, so it is load-bearing precisely while the window is
+      open. MODEL_CARD.md names it among the controls that remain in force after white-box
+      evasion is accepted.
+    how_to_verify: >-
+      PYTHONHASHSEED=0 .venv/bin/pytest tests/integration/test_predict_abuse_controls.py
+    evidence:
+      - backend/ratelimit.py
+      - backend/config.py
+      - tests/integration/test_predict_abuse_controls.py
+      - tests/integration/test_deployed_traversal.py
