@@ -130,4 +130,4 @@ infra/runpod/runpod_pods.json
 
 # Playwright MCP scratch output: browser snapshots and console logs from screenshot runs.
 # The screenshots that matter are moved into docs/evidence/screenshots/ deliberately.
-.playwright-mcp/
+/.playwright-mcp/
