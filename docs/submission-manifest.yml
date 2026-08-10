@@ -182,22 +182,28 @@ deliverables:
       is a materially larger risk than the few supervised hours the original acceptance
       assumed.
     survives_stop_start:
-      status: unverified
+      status: verified
+      verified_on: 2026-08-10
       claim: >-
-        The stack returns to health after the instances and RDS are stopped and started.
-      why_unverified: >-
-        No stop/start cycle has been run against the deployed stack. docs/evidence/
-        p5-rollback-rehearsal.md rehearses the SHA rollback and says in its own words that
-        its health check "only proves the containers restarted", which is a different and
-        weaker claim. infra/deploy/toxic-stack.service brings the stack up at boot and
-        `make aws-up` gates on three live health endpoints, so the mechanism exists and is
-        tested in unit form -- but the cycle itself has not been performed end to end, so
-        this is recorded as unverified rather than asserted.
-      how_to_verify: make aws-down && make aws-up && make deploy-verify
-      partial_evidence:
-        - tests/infra/test_aws_up.py
-        - tests/unit/test_systemd_unit.py
-        - docs/evidence/p5-rollback-rehearsal.md
+        The stack returns to health after the instances and RDS are stopped and started, with
+        the data intact and the published URLs unchanged.
+      evidence: docs/evidence/p5-stop-start-cycle.md
+      measured:
+        stopped_at: 2026-08-10T19:48:34Z
+        rds_reached_stopped: 2026-08-10T19:59:27Z
+        endpoints_refused_while_down: true
+        back_to_healthy_at: 2026-08-10T20:29:56Z
+        predictions_before: 2033
+        predictions_after: 2033
+        feedback_after: 797
+        review_queue_after: 665
+        elastic_ips_unchanged: true
+      note: >-
+        The cycle also found two real defects, both fixed in the same commit and both
+        recorded in the evidence document: the dump's own verification step could not
+        complete (and could not detect the truncation it existed to catch), and `make aws-up`
+        could never succeed on this fleet because it waited for a boot marker that had never
+        been written.
 
 # H15 / H13. The compensating controls that docs/tls-decision.md and MODEL_CARD.md write
 # their accepted risks as resting on. docs/post-demo-closure.md is the procedure,

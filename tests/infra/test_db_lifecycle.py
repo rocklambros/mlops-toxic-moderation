@@ -224,6 +224,48 @@ def test_the_uploaded_dump_is_proved_readable_before_the_command_returns():
     )
 
 
+def test_the_verification_reads_the_whole_archive_and_not_only_the_table_of_contents():
+    """`pg_restore --list` cannot detect the truncation this check exists to catch.
+
+    Measured against the live backend instance on 2026-08-10: an archive cut to 200000 of
+    685079 bytes exits **0** under `pg_restore --list`, because the table of contents of a
+    custom-format archive sits near the front and `--list` never reads a data block. The
+    same truncated archive fails `pg_restore --file=/dev/null` with "could not read from
+    input file: end of file", because that reads and decompresses every block.
+
+    A check that passes on a 29%-complete dump is worse than no check, because it is
+    believed.
+    """
+    body = shell_code(DUMP)
+    assert re.search(r"pg_restore\s+--file=/dev/null", body), (
+        "the dump is verified only with `pg_restore --list`, which exits 0 on a truncated "
+        "archive. Restore the whole thing to /dev/null so every data block is read"
+    )
+
+
+def test_the_verification_does_not_pipe_the_download_into_pg_restore():
+    """The reader exits first, and `pipefail` turns that into a fatal error.
+
+    `pg_restore` stops once it has what it needs, which for `--list` is the header and TOC.
+    In `aws s3 cp ... - | pg_restore`, that leaves `aws` writing into a closed pipe: it takes
+    EPIPE, exits 1, and `set -o pipefail` fails the script even though the archive is
+    perfect. Measured on 2026-08-10, the pipeline's exit codes were `1 0` -- the uploader
+    failed, the verifier succeeded.
+
+    It stays dormant while the dump fits in the 64 KiB pipe buffer, which is why this
+    survived every rehearsal and fired on the graded dataset.
+    """
+    body = shell_code(DUMP)
+    piped = re.search(
+        r"aws s3 cp[^\n|]*\s-\s*(?:\\\s*\n\s*)?\|\s*(?:\\\s*\n\s*)?docker[^\n]*pg_restore",
+        body,
+    )
+    assert piped is None, (
+        "the uploaded object is streamed straight into pg_restore. The reader exits before "
+        "the writer finishes and pipefail makes that fatal; download to a file first"
+    )
+
+
 def test_the_postgres_image_is_pinned_by_digest():
     """A floating tag decides, at teardown time, which pg_dump writes the graded dataset."""
     body = shell_code(DUMP)

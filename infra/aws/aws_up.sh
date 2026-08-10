@@ -60,15 +60,60 @@ aws ec2 wait instance-status-ok --region "${REGION}" --instance-ids ${INSTANCE_I
 #
 #    On an ordinary stop/start this is already present from the first boot and the loop exits
 #    immediately; it earns its place when an instance has been REPLACED.
+#    ...and when it is absent, ask the question it was a proxy for, directly.
+#
+#    Measured against the live fleet on 2026-08-10: this gate could never pass, so `make
+#    aws-up` -- the documented recovery command, the one docs/HANDOFF.md sends the next
+#    person to -- failed every time after burning TIMEOUT seconds per component.
+#
+#    The cause is not a broken host. `infra/terraform/compute.tf` sets
+#    `user_data_replace_on_change = false` and puts `user_data` under `ignore_changes`,
+#    deliberately, because the SCP denies `ec2:ModifyInstanceAttribute`. So when the marker
+#    was added to the template, Terraform correctly changed nothing on the already-running
+#    instances, and `/toxic/boot/*` has never existed on this fleet. The comment above --
+#    "already present from the first boot" -- was true of the design and false of the
+#    hardware.
+#
+#    A host that is answering HTTP has finished booting. That is the same claim the marker
+#    makes, arrived at by observation rather than by proxy, so it is the better evidence
+#    when both are available. It is NOT silent: a marker that can be skipped without anyone
+#    noticing stops meaning anything, and the next replaced instance needs it to mean
+#    something.
+#    The fallback deliberately does NOT probe an endpoint itself. `verify_live.sh` is the one
+#    implementation of "is it up?" in this repository and the same one the deploy gates on; a
+#    second one here would be a second thing that can disagree with it, and the one that
+#    disagrees quietly is the one an operator believes.
+missing_markers=""
+
 for component in ${COMPONENTS}; do
   deadline=$(( $(date +%s) + TIMEOUT ))
   until [ -n "$(param "${PARAM_PREFIX}/boot/${component}")" ]; do
-    [ "$(date +%s)" -lt "${deadline}" ] \
-      || die "${component}: no boot marker at ${PARAM_PREFIX}/boot/${component} -- see docs/runbooks/no-ssh-debug.md, and grep the console output for TOXIC-USER-DATA-COMPLETE"
+    if [ "$(date +%s)" -ge "${deadline}" ]; then
+      missing_markers="${missing_markers}${component} "
+      break
+    fi
     sleep "${POLL}"
   done
-  printf 'aws_up: %s boot marker present\n' "${component}"
+  [ -n "$(param "${PARAM_PREFIX}/boot/${component}")" ] \
+    && printf 'aws_up: %s boot marker present\n' "${component}"
 done
+
+# A missing marker is not automatically a broken host, so ask the gate before giving up. If
+# the stack is already serving, the claim the marker makes -- this host finished booting --
+# is already true and already observed, by the same check the deploy trusts. If it is not
+# serving, there is no evidence either way and the original failure stands.
+if [ -n "${missing_markers}" ]; then
+  if "${HERE}/verify_live.sh" >/dev/null 2>&1; then
+    printf 'aws_up: no boot marker for: %s\n' "${missing_markers% }" >&2
+    printf 'aws_up:   the stack is already serving, so continuing. A host answering HTTP has\n' >&2
+    printf 'aws_up:   finished booting, which is what the marker asserts.\n' >&2
+    printf 'aws_up:   Expected on instances provisioned before the marker existed: compute.tf sets\n' >&2
+    printf 'aws_up:   user_data_replace_on_change = false and ignores user_data, deliberately,\n' >&2
+    printf 'aws_up:   so adding the marker to the template never reached the running fleet.\n' >&2
+  else
+    die "no boot marker for: ${missing_markers% } and the stack is not serving -- see docs/runbooks/no-ssh-debug.md, and grep the console output for TOXIC-USER-DATA-COMPLETE"
+  fi
+fi
 
 # 4. The application. `restart: unless-stopped` covers a Docker daemon restart; it does not
 #    cover a replaced instance, and it does not cover a host whose stack was taken down by a

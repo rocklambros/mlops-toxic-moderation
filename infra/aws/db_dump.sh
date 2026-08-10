@@ -85,8 +85,30 @@ docker run --rm --network host \
 # `pg_restore --clean` against it drops every table and THEN fails -- the exact data loss the
 # dump exists to prevent, delivered by the restore. Read the uploaded bytes back and make
 # pg_restore parse them.
-aws s3 cp --region "${REGION}" "s3://${BUCKET}/${KEY}" - \
-  | docker run --rm -i "${PG_IMAGE}" pg_restore --list >/dev/null
+#
+# NOT through a pipe, and NOT with `--list` alone. Both were wrong, and both were measured
+# against this stack on 2026-08-10:
+#
+#   * `aws s3 cp ... - | pg_restore --list` exits `1 0`. `pg_restore` stops as soon as it has
+#     parsed the table of contents and closes its stdin; `aws s3 cp` is still writing, takes
+#     EPIPE, and exits 1; `set -o pipefail` then fails the whole script over a verification
+#     that actually succeeded. It stays dormant while the dump fits in the 64 KiB pipe
+#     buffer, which is why it survived every rehearsal and fired on the graded dataset at
+#     685 KB.
+#   * For the same reason, `--list` never reads a single data block: the TOC of a
+#     custom-format archive sits near the front. An archive truncated to 200000 of 685079
+#     bytes exits **0** under `--list`. The check could not detect the one failure it was
+#     written to catch, and a check that passes on a 29%-complete dump is worse than no
+#     check, because it is believed.
+#
+# So: fetch to a file, parse the TOC, then restore the whole archive to /dev/null, which
+# reads and decompresses every block. The truncated archive above fails that step with
+# "could not read from input file: end of file".
+VERIFY="$(mktemp)"
+trap 'rm -f "${VERIFY}"' EXIT
+aws s3 cp --region "${REGION}" "s3://${BUCKET}/${KEY}" "${VERIFY}"
+docker run --rm -i "${PG_IMAGE}" pg_restore --list < "${VERIFY}" >/dev/null
+docker run --rm -i "${PG_IMAGE}" pg_restore --file=/dev/null < "${VERIFY}"
 
 printf 'db_dump: s3://%s/%s is a readable custom-format archive\n' "${BUCKET}" "${KEY}"
 REMOTE_EOF
