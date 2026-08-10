@@ -80,8 +80,9 @@ enforces that, and a PARTIAL with no written justification also fails the suite.
 
 ## What this self-grade does not cover
 
-Three things are outside the rubric but would be dishonest to omit from a document that
-claims to grade the system:
+Three things outside the rubric that would be dishonest to omit from a document claiming to
+grade the system. Two closed on 2026-08-10 and are struck through rather than deleted; the
+open one is item 2:
 
 1. ~~`survives_stop_start` is unverified.~~ **Verified 2026-08-10**: full stop, RDS to
    `stopped`, endpoints refusing, then back to three healthy endpoints with 2033 predictions
@@ -92,5 +93,7 @@ claims to grade the system:
 2. **The demo window is open with no scheduled close**, so the graded listeners serve
    cleartext HTTP to the internet until someone closes them. `docs/tls-decision.md` accepts
    this and `docs/post-demo-closure.md` owns closing it.
-3. **The SNS alert subscription is unconfirmed.** The budget alarm and both health alarms
-   publish to a topic with no confirmed subscriber, so they currently notify nobody.
+3. ~~The SNS alert subscription is unconfirmed.~~ **Confirmed and delivering, 2026-08-10**,
+   verified by publishing a test message rather than by reading the subscription state. Four
+   CloudWatch alarms and the `$100` monthly budget publish to `toxic-mod-alerts`; all four
+   alarms are in `OK`.

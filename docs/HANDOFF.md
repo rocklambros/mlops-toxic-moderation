@@ -55,7 +55,10 @@ report success until all three health endpoints answer.
 
 ## What is not finished
 
-Two things, all recorded rather than hidden. `docs/rubric-conformance.md` carries the same
+**One thing, item 2.** The other two were open earlier on 2026-08-10 and are struck through
+rather than deleted, because how they closed is the useful part -- both were closed by
+running the thing rather than by re-reading the code, and both turned out to be broken in a
+way no amount of re-reading would have shown. `docs/rubric-conformance.md` carries the same
 list at the bottom of the self-grade.
 
 1. ~~`survives_stop_start` is unverified.~~ **Done, 2026-08-10.** The full cycle ran and
@@ -67,11 +70,16 @@ list at the bottom of the self-grade.
    goes red on 2026-09-15 as a backstop. Close it with `make close-demo`, which also rotates
    the reviewer secret and the demo API key, then records nothing — you do that in the
    manifest, and `tests/unit/test_post_demo_closure.py` stays red until you do.
-3. **The SNS alert subscription is unconfirmed.** The budget alarm and both health alarms
-   publish to `toxic-mod-alerts`, which has no confirmed subscriber, so they notify nobody.
-   A confirmation email was sent to `rock@rockcyber.com` on 2026-08-10; AWS drops unconfirmed
-   email subscriptions after three days, which is why there was no subscriber to begin with.
-   Re-send by re-applying Terraform.
+3. ~~The SNS alert subscription is unconfirmed.~~ **Confirmed and delivering, 2026-08-10.**
+   Four CloudWatch alarms — `backend-health-probe`, `backend-status-check`,
+   `health-probe-not-running`, `predict-unavailable` — and the `$100` `toxic-mod-monthly`
+   budget all publish to `toxic-mod-alerts`, and a test message was delivered end to end.
+
+   It had no confirmed subscriber at all until today: AWS deletes an unconfirmed email
+   subscription after three days, so the one Terraform created on first apply had silently
+   expired and every alarm was publishing into nothing. If `aws sns
+   list-subscriptions-by-topic` ever shows `PendingConfirmation` again, that is the same
+   failure — re-apply Terraform to resend, and confirm within three days.
 
 ## Rubric self-grade
 
