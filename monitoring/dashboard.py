@@ -432,7 +432,7 @@ def render(data: Snapshot) -> None:
                 ],
             ),
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
         )
 
     st.subheader("User feedback")
@@ -465,7 +465,7 @@ def _render_drift(data: Snapshot) -> None:
             color=alt.Color("series:N", title=""),
         )
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
     st.dataframe(
         pd.DataFrame(
             [
@@ -482,7 +482,7 @@ def _render_drift(data: Snapshot) -> None:
             columns=["label", "baseline", "production", "PSI", "JS", "alert"],
         ),
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
     )
     if data.flags is not None and len(data.flags) > 1:
         st.line_chart(data.flags, x="bucket", y=list(LABELS))

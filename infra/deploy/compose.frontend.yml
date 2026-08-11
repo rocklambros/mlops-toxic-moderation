@@ -24,6 +24,8 @@ services:
     logging:
       driver: awslogs
       options:
+        mode: non-blocking
+        max-buffer-size: 4m
         awslogs-region: ${AWS_REGION}
         awslogs-group: ${LOG_GROUP_FRONTEND}
         awslogs-stream: frontend
@@ -54,6 +56,8 @@ services:
     logging:
       driver: awslogs
       options:
+        mode: non-blocking
+        max-buffer-size: 4m
         awslogs-region: ${AWS_REGION}
         # The frontend host has ONE Terraform log group (aws_cloudwatch_log_group.app is
         # keyed on the four components, and "reviewer" is not one of them). Two entry points

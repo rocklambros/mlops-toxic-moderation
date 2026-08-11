@@ -62,6 +62,39 @@ def test_every_production_service_ships_logs_to_cloudwatch():
         assert options["awslogs-create-group"] == "false", "the group is Terraform's, not Docker's"
 
 
+def test_no_service_can_be_stalled_by_its_own_logging_driver():
+    """Docker's awslogs driver blocks the container's stdout write by default, and a
+    blocked write stalls the application.
+
+    Observed on the live monitoring tier, 2026-08-11: CloudWatch delivery stopped while the
+    container kept logging, the blocked write stalled Streamlit, the compose healthcheck's
+    5-second probe timed out five times, and Docker killed and restarted the container --
+    four times in twenty minutes. `docker events` showed the whole loop:
+
+        exec_create -> exec_die (5s, the timeout) ... health_status: unhealthy -> die -> start
+
+    Nothing was wrong with the application. `collect()` measured 0.02s, RDS sat at 1-2
+    connections and 4% CPU, the instance had 575 of 576 CPU credits, and the same probe run
+    by hand against an idle container returned in 0.01s. The dashboard was unusable to a
+    browser and every gate in the system reported healthy, because `_stcore/health` answers
+    from the web server and the deploy gate asks nothing else.
+
+    `mode: non-blocking` makes the driver drop log lines under back-pressure instead of
+    stalling the process. Losing a log line is a bad day; losing the graded dashboard
+    because a log line could not be delivered is a worse one.
+    """
+    for service_name, spec in _all_services().items():
+        options = spec["logging"]["options"]
+        assert options.get("mode") == "non-blocking", (
+            f"{service_name} uses the awslogs driver in blocking mode, so a CloudWatch "
+            f"stall stops the container serving"
+        )
+        assert options.get("max-buffer-size"), (
+            f"{service_name} sets non-blocking with no max-buffer-size, so the buffer is "
+            f"whatever Docker defaults to and back-pressure is unbounded"
+        )
+
+
 def test_no_two_services_interleave_into_one_stream():
     """H27 one level down: a log that leaves the box into a stream shared with another
     process is a log nobody can read. The re-scorer additionally needs its OWN GROUP -- it

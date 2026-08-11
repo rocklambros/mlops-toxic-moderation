@@ -27,6 +27,8 @@ services:
     logging:
       driver: awslogs
       options:
+        mode: non-blocking
+        max-buffer-size: 4m
         awslogs-region: ${AWS_REGION}
         awslogs-group: ${LOG_GROUP_MONITORING}
         awslogs-stream: monitoring
@@ -46,6 +48,8 @@ services:
     logging:
       driver: awslogs
       options:
+        mode: non-blocking
+        max-buffer-size: 4m
         awslogs-region: ${AWS_REGION}
         # Its own group, explicitly. This host's Docker daemon default points at the
         # monitoring group, so without this line the challenger's output interleaves with
