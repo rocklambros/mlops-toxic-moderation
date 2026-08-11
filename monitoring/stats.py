@@ -121,6 +121,11 @@ def psi(p_ref: float, p_prod: float, eps: float = 1e-6) -> float:
 
     Bands are the industry-standard reading: < 0.1 no meaningful shift, 0.1-0.2 moderate,
     >= 0.2 major. `eps` floors each bin so an all-zero reference cannot produce log(0).
+
+    The bands say nothing about how many observations `p_prod` was computed from, and this
+    function is not given the chance to ask: `psi(0.0961, 1/3)` is 0.35 whether that third
+    came from one comment or four hundred. The floor that makes the difference is the
+    caller's, `monitoring.queries.MIN_DRIFT_SAMPLES`.
     """
     total = 0.0
     for ref, prod in ((p_ref, p_prod), (1.0 - p_ref, 1.0 - p_prod)):
@@ -145,3 +150,60 @@ def js_divergence(p_ref: float, p_prod: float, eps: float = 1e-12) -> float:
     prod = [p_prod, 1.0 - p_prod]
     mid = [(a + b) / 2.0 for a, b in zip(ref, prod, strict=True)]
     return 0.5 * kl(ref, mid) + 0.5 * kl(prod, mid)
+
+
+def observation_is_improbable(baseline_rate: float, observed_rate: float, n: int,
+                              alpha: float = 0.01) -> bool:
+    """True when `n` draws at `baseline_rate` would rarely land this far from it.
+
+    PSI answers "how far apart are these two rates" and nothing else. Its value does not move
+    with the sample size: against a 0.0961 baseline an observed rate of zero scores 1.112
+    whether it was measured over thirty predictions or ten thousand. So a PSI threshold alone
+    cannot tell a real shift from a quiet afternoon, and a fixed floor on `n` cannot either --
+    a floor calibrated for a 10 percent baseline is far too low for `threat` at 0.003, where
+    seeing no flags in thirty predictions is the ordinary case rather than a signal.
+
+    This supplies the missing half: the one-sided binomial tail probability of an observation
+    at least this extreme, given the baseline. Thirty predictions with no flags against a
+    0.0961 baseline is a one-in-twenty-one event, which is not evidence. Sixty is
+    one-in-four-hundred, which is. The same arithmetic adapts itself per label, so the rare
+    labels demand the larger sample they actually need.
+
+    Implemented with an exact binomial tail rather than a normal approximation because the
+    interesting cases sit at zero successes and small `n`, which is exactly where the normal
+    approximation is worst.
+    """
+    if n <= 0:
+        return False
+    p = min(max(float(baseline_rate), 0.0), 1.0)
+    if p <= 0.0 or p >= 1.0:
+        return False
+    successes = int(round(float(observed_rate) * n))
+    successes = min(max(successes, 0), n)
+    expected = p * n
+
+    # Computed in log space. The direct form overflows: math.comb(2000, 600) does not fit in
+    # a float, and the graded window routinely holds two thousand rows.
+    log_p, log_q = math.log(p), math.log1p(-p)
+    log_n_fact = math.lgamma(n + 1)
+
+    def log_pmf(k: int) -> float:
+        return (
+            log_n_fact
+            - math.lgamma(k + 1)
+            - math.lgamma(n - k + 1)
+            + k * log_p
+            + (n - k) * log_q
+        )
+
+    # Sum the tail on the side the observation actually fell, so a rate above the baseline and
+    # a rate below it are both answerable.
+    ks = range(0, successes + 1) if successes <= expected else range(successes, n + 1)
+    terms = [log_pmf(k) for k in ks]
+    if not terms:
+        return False
+    # Subtract the largest term before exponentiating, so the sum stays inside float range
+    # even when every individual probability underflows.
+    peak = max(terms)
+    tail = math.exp(peak) * sum(math.exp(term - peak) for term in terms)
+    return tail < alpha

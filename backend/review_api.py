@@ -5,6 +5,13 @@ container needs a database credential: the premortem (H12, H16) found that openi
 port also exposed a console with direct RDS write access to the graded metric, and the
 cheapest way to stop that being true is for the UI to have no database access at all.
 
+Where these routes are served, which is not obvious and was got wrong: on port 8000, the
+same listener as /predict, open to `0.0.0.0/0` for the demo window. Taking the reviewer *UI*
+off the internet (8503 has no ingress rule on any security group) did not take the reviewer
+*capability* off it. The abuse gate in `backend/app.py` is therefore in front of all four
+routes -- demo key, rate limit and body cap -- and /review/login is the one exemption from
+the key, because `frontend.api_client.BackendClient.login` sends no headers.
+
 Four properties here are controls rather than conveniences.
 
 * `SubmitRequest` has no `reviewer_id` field and forbids extras, so a client cannot assert
@@ -15,15 +22,24 @@ Four properties here are controls rather than conveniences.
   test can see, and the feedback row -- the numerator of the graded accuracy metric -- would
   be written twice under concurrency. The row is locked FOR UPDATE and the feedback insert
   happens only when the UPDATE claimed it.
-* `/review/login` is rate limited per caller. The shared secret is the only thing between
-  the internet and the graded metric, and an unlimited endpoint makes it brute-forceable
-  online. Every attempt costs a token, including a successful one, so the counter does not
-  leak whether a guess was right.
-* `/feedback/user` needs no credential -- rubric 3.2 grades anonymous user feedback -- but
-  every verdict must name a prediction that exists, is inside the feedback window, has no
-  verdict yet, and belongs to a source under its quota. The ceiling on the whole path is
-  therefore the number of predictions the caller could make, and /predict is itself keyed
-  and rate limited.
+* `/review/login` is rate limited on the TCP peer, which is the binding control and not the
+  gate's. The gate meters this route too, but it meters the caller identity, and a caller
+  can influence that; the peer here is a value nothing in the request can change. The shared
+  secret is the only thing between the internet and the graded metric -- literally so, since
+  this is the one route the gate cannot put the demo key in front of -- and an unlimited
+  endpoint makes the secret brute-forceable online. Every attempt costs a token, including a
+  successful one, so the counter does not leak whether a guess was right. The secret still
+  crosses a cleartext listener, which `docs/tls-decision.md` now records as an accepted risk
+  rather than as something the deployment prevents.
+* `/feedback/user` asserts no user identity -- rubric 3.2 grades anonymous user feedback,
+  and the handler below asks for no reviewer token and no name. It is not, however,
+  unauthenticated at the edge: the demo key the user UI already sends on it is required by
+  the gate, because a verdict-writing route on an internet-facing listener with no
+  credential at all is a write path into the graded metric for anyone who finds the port.
+  Beyond that, every verdict must name a prediction that exists, is inside the feedback
+  window, has no verdict yet, and belongs to a source under its quota. The ceiling on the
+  whole path is therefore the number of predictions the caller could make, and /predict is
+  itself keyed and rate limited.
 
 Flags are recomputed from the pinned `thresholds.json` rather than a 0.5 default, so
 reviewer agreement is measured against the decision rule that actually produced the

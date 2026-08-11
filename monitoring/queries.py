@@ -28,6 +28,7 @@ from monitoring.stats import (
     AccuracyReport,
     horvitz_thompson_accuracy,
     js_divergence,
+    observation_is_improbable,
     psi,
     wilson_interval,
 )
@@ -73,6 +74,20 @@ def latency_over_time(conn, since: dt.datetime) -> list[LatencyBucket]:
 # Standard PSI reading: < 0.1 no meaningful shift, 0.1-0.2 moderate, >= 0.2 major.
 DEFAULT_ALERT_PSI = 0.2
 
+# The denominator an alert has to rest on, and the drift panel's counterpart to the latency
+# panel's `MIN_SAMPLES_PER_BUCKET`.
+#
+# PSI reads a proportion and knows nothing about the count behind it. One flagged comment
+# out of three is a 33% flag rate against a 9.6% baseline: PSI 0.35, a "major shift" alert.
+# Under that same baseline, seeing at least one flag in three predictions happens 27% of the
+# time, so the alert is a coin flip on a quiet day rather than a finding. At 30 predictions
+# it takes 9 flags to cross 0.2, which the baseline produces 0.2% of the time. Thirty is
+# roughly where the alert stops being a property of the sample size.
+#
+# This is not solved by widening the drift window. The window is bounded so that PSI can say
+# drift *started*; a wider one dilutes new traffic with old for as long as the project runs.
+MIN_DRIFT_SAMPLES = 30
+
 
 @dataclass(frozen=True)
 class DriftRow:
@@ -82,6 +97,11 @@ class DriftRow:
     psi: float
     js: float
     alert: bool
+    # How many predictions `production_rate` is a proportion OF. A rate of 0.0 over n=0 is
+    # "nobody asked the model anything"; over n=1200 it is "the model flagged nothing".
+    # Those are different findings and the rate alone cannot tell them apart. `None` means
+    # the count was not recorded, which `drift_report` never does.
+    n: int | None = None
 
 
 def _flag_sum_sql() -> str:
@@ -114,6 +134,9 @@ def production_flag_rates(
     ).mappings().one()
     n = int(row["n"])
     if n == 0:
+        # Placeholders, not measurements. The count is returned first precisely so a caller
+        # cannot read these zeros as a flag rate: against a 9.6% baseline a genuine 0.0
+        # scores PSI 1.11, which is a major-shift alert raised by an untouched database.
         return 0, {label: 0.0 for label in LABELS}
     return n, {label: float(row[f"flag_{label}"] or 0) / n for label in LABELS}
 
@@ -124,13 +147,20 @@ def drift_report(
     thresholds: dict[str, float],
     baseline: Baseline,
     alert_psi: float = DEFAULT_ALERT_PSI,
+    min_n: int = MIN_DRIFT_SAMPLES,
 ) -> list[DriftRow]:
-    """One row per label: the Phase 1 reference rate, the production rate, and the distance.
+    """One row per label: the Phase 1 reference rate, the production rate, its denominator,
+    and the distance.
 
     An empty window is a zero rate, not a division by zero -- this panel has to render on a
-    database nobody has sent traffic to yet (premortem C5).
+    database nobody has sent traffic to yet (premortem C5). It is also not a drift alert. An
+    alert needs a distance and a denominator, and PSI supplies only the first: `min_n` is
+    how many predictions that distance has to be measured over before it says something
+    about the traffic rather than about the sample size. `n` travels on every row so the
+    panel can name which of the two is missing rather than printing "investigate the model"
+    over three comments.
     """
-    _, production = production_flag_rates(conn, since, thresholds)
+    n, production = production_flag_rates(conn, since, thresholds)
     rows = []
     for label in LABELS:
         reference = baseline.flag_rates[label]
@@ -143,7 +173,12 @@ def drift_report(
                 production_rate=observed,
                 psi=score,
                 js=js_divergence(reference, observed),
-                alert=score >= alert_psi,
+                alert=(
+                    score >= alert_psi
+                    and n >= min_n
+                    and observation_is_improbable(reference, observed, n)
+                ),
+                n=n,
             )
         )
     return rows

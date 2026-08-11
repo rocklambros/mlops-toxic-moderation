@@ -35,6 +35,18 @@ QUEUE_STATUSES = ("pending", "rescored")
 
 SIGN_IN_FAILED = "Invalid reviewer secret."
 QUEUE_UNAVAILABLE = "Could not load the queue."
+
+# A 429 is the backend asking for a pause, not the backend rejecting who you are. Signing the
+# reviewer out on one turns a one-minute wait into re-entering the shared secret, and the
+# secret is the thing worth typing least often.
+QUEUE_BUSY = (
+    "The backend is rate limiting this session. Wait a moment and reload. You are still "
+    "signed in."
+)
+
+# Statuses that mean the token is no longer good. Anything else is transient and the session
+# survives it.
+AUTH_FAILURE_STATUSES = frozenset({401, 403})
 QUEUE_EMPTY = "The queue is empty."
 NO_CHALLENGER = "Challenger scores are not available for this item."
 REVIEW_FAILED = "The review was not recorded."
@@ -117,9 +129,15 @@ def main() -> None:
     try:
         items = client.pending(token, limit=20)
     except BackendError as exc:
-        st.error(QUEUE_UNAVAILABLE)
-        render_comment(exc.detail)
-        st.session_state.pop("token", None)
+        if exc.status_code in AUTH_FAILURE_STATUSES:
+            st.error(QUEUE_UNAVAILABLE)
+            render_comment(exc.detail)
+            st.session_state.pop("token", None)
+        elif exc.status_code == 429:
+            st.warning(QUEUE_BUSY)
+        else:
+            st.error(QUEUE_UNAVAILABLE)
+            render_comment(exc.detail)
         return
 
     if not items:
