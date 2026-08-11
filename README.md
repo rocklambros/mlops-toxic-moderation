@@ -372,9 +372,11 @@ inside the seeder, because an abuse control a tool quietly works around is not a
 
 ## Data handling and retention
 
-`/predict` stores the submitted comment in `predictions.input_text`. A scheduled purge nulls
-it after `INPUT_TEXT_RETENTION_DAYS`, default 30, and keeps the rest of the row for
-monitoring. Raw comment text is never written to Weights & Biases, to application logs, or to
+`/predict` stores the submitted comment in `predictions.input_text`. `make purge` nulls it
+after `INPUT_TEXT_RETENTION_DAYS`, default 30, and keeps the rest of the row for monitoring.
+That purge is an operator command rather than a scheduled job: `backend/retention.py` is
+correct and tested, and nothing invokes it on a timer, so the retention window holds only
+when someone runs it. `SECURITY.md` records that as Partial rather than Enforced. Raw comment text is never written to Weights & Biases, to application logs, or to
 any screenshot in this repository. The review queue keeps its own snapshot so a purge cannot
 destroy a reviewer's evidence mid-workflow, and that snapshot has its own hard TTL.
 

@@ -107,7 +107,8 @@ def main() -> None:
     st.title("Toxic comment moderation")
     st.caption(
         "Submit a comment to see the moderation decision and the six per-label calibrated "
-        "probabilities. Comments are retained for 30 days and then the text is purged."
+        "probabilities. Comments are stored so the monitoring dashboard can be built from "
+        "them, and the text is purged on a 30-day retention policy the operator runs."
     )
 
     text = st.text_area("Comment", max_chars=MAX_INPUT_CHARS, height=140)

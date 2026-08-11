@@ -103,8 +103,19 @@ def test_predict_is_rejected_without_the_demo_key(endpoints):
     assert response.status_code == 401
 
 
-def test_the_frontend_instance_can_reach_the_backend_instance(endpoints):
-    """Instance-to-instance HTTP through two security groups."""
+def test_the_frontend_instance_serves_its_own_page(endpoints):
+    """RENAMED. This never touched the backend.
+
+    It was called `test_the_frontend_instance_can_reach_the_backend_instance` and described
+    as "instance-to-instance HTTP through two security groups", but both requests below go to
+    the frontend and are answered by its own web server. Deleting the backend entirely would
+    have left it green, so it asserted a proxy for the property in its name.
+
+    The frontend-to-backend hop is genuinely covered, one test down: submitting through
+    `/predict` and finding the row in the database is what proves traffic crossed the two
+    security groups. This one proves the frontend is up, which is worth knowing on its own
+    and is all it ever proved.
+    """
     page = httpx.get(endpoints["frontend_url"], timeout=30, follow_redirects=True)
     assert page.status_code == 200
     health = httpx.get(f"{endpoints['frontend_url']}/_stcore/health", timeout=15)
