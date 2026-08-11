@@ -19,6 +19,10 @@ import yaml
 from scripts.redact import scan
 
 MANIFEST = Path("docs/submission-manifest.yml")
+# The three service addresses README.md publishes on purpose. scripts/redact.py exempts
+# exactly these, and scripts/verify_submission.py checks against the same list.
+PUBLISHED_ENDPOINTS = frozenset({"44.239.182.162", "34.210.186.130", "52.43.232.239"})
+
 REQUIRED_SCREENSHOTS = {
     "aws-console-three-ec2-and-rds",
     "live-prototype-on-ec2",
@@ -96,14 +100,26 @@ def test_the_stop_start_claim_is_recorded_with_a_status_rather_than_asserted():
         assert entry.get("partial_evidence"), "say what IS proven, so the gap is bounded"
 
 
-def test_the_live_url_does_not_publish_a_public_address():
-    """README.md refers to the endpoints as <eip-N> so a public repository does not
-    advertise three cleartext listeners to everything that crawls GitHub. This file keeps
-    that promise, and names the SSM parameter that resolves instead."""
+def test_the_only_addresses_published_are_the_three_chosen_ones():
+    """REPLACES `test_the_live_url_does_not_publish_a_public_address`.
+
+    That test asserted a dotted-quad regex over two fields of this one file, under a name
+    that made a claim about the whole repository. When the README started publishing the
+    three service addresses on purpose, the name became false while the assertion stayed
+    green, and `scripts/verify_submission.py` printed "no public address is published in the
+    repository" to anyone running the gate.
+
+    The property worth holding is not "no address" -- that ship sailed deliberately -- but
+    "these three and no others", so a fourth host leaking in is still a finding rather than
+    riding the precedent. `scripts/redact.py` exempts exactly the same three by value.
+    """
     entry = _doc()["deliverables"]["live_url"]
+    found = set()
     for field in ("url", "health_url"):
-        assert not re.search(r"\b\d{1,3}(\.\d{1,3}){3}\b", entry[field]), field
-        assert "<eip-" in entry[field], f"{field} should use the README's placeholder form"
+        found.update(re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", str(entry[field])))
+    assert found, "the live URL resolves to nothing a reader can open"
+    unexpected = found - PUBLISHED_ENDPOINTS
+    assert not unexpected, f"an unexpected address is published: {sorted(unexpected)}"
     assert entry.get("url_parameter", "").startswith("/toxic/"), "no resolvable source given"
 
 

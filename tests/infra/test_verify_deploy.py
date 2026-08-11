@@ -69,16 +69,32 @@ def _serve(routes: dict[str, tuple[int, str]]) -> tuple[int, http.server.HTTPSer
     return server.server_address[1], server
 
 
+# What Streamlit's host-config endpoint returns: a JSON document, not a constant.
+HOST_CONFIG = '{"allowedOrigins":[],"useExternalAuthToken":false}'
+
+
 @pytest.fixture()
 def stack():
     servers = []
 
-    def start(backend_body=COMPACT, backend_status=200, ui_status=200, ui_body="ok"):
+    def start(
+        backend_body=COMPACT,
+        backend_status=200,
+        ui_status=200,
+        ui_body="ok",
+        cfg_status=200,
+    ):
+        # A real Streamlit server answers both. The gate probes the second one because the
+        # first is a two-byte constant that kept answering `ok` through the 2026-08-11
+        # restart loop, while host-config -- which the server has to assemble -- failed every
+        # time. `cfg_status` exists so a test can serve one and not the other, which is
+        # exactly the shape of that incident.
+        cfg = (cfg_status, HOST_CONFIG)
         ports = {}
         for name, routes in (
             ("backend", {"/health": (backend_status, backend_body)}),
-            ("frontend", {"/_stcore/health": (ui_status, ui_body)}),
-            ("monitoring", {"/_stcore/health": (ui_status, ui_body)}),
+            ("frontend", {"/_stcore/health": (ui_status, ui_body), "/_stcore/host-config": cfg}),
+            ("monitoring", {"/_stcore/health": (ui_status, ui_body), "/_stcore/host-config": cfg}),
         ):
             port, server = _serve(routes)
             servers.append(server)
@@ -231,3 +247,18 @@ def test_the_probe_is_the_same_shape_as_the_backends_own_serialisation():
     rendered = JSONResponse(HEALTH).body.decode()
     assert rendered == COMPACT, f"FastAPI now serialises as {rendered!r}"
     assert rendered != SPACED
+
+
+def test_a_streamlit_server_answering_only_the_constant_is_not_called_healthy(tmp_path, stack):
+    """The 2026-08-11 incident, as a test.
+
+    The monitoring container was restarting every four minutes and `_stcore/health` kept
+    answering `ok` often enough to pass the gate, because it is a two-byte constant served by
+    the Tornado server and needs almost nothing of the process behind it. `host-config` --
+    which the server has to assemble -- failed every time. Every gate in the system reported
+    healthy over a dashboard that would not render.
+    """
+    urls = stack(cfg_status=503)
+    result = run(SCRIPT, [], tmp_path / "bin", env={**FAST, **urls})
+    assert result.returncode != 0, "the gate passed a server that only serves the constant"
+    assert "host-config" in result.stderr

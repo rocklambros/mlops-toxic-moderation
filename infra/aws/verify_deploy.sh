@@ -70,6 +70,26 @@ check backend "${BACKEND_URL}/health" '"database"[[:space:]]*:[[:space:]]*"ok"'
 check frontend   "${FRONTEND_URL}/_stcore/health"   '^ok$'
 check monitoring "${MONITORING_URL}/_stcore/health" '^ok$'
 
+# ...and a second, heavier probe per Streamlit tier, because the first one is not enough and
+# this gate has already been fooled by it once.
+#
+# On 2026-08-11 the monitoring container was restarting every four minutes: the awslogs
+# driver was in blocking mode, CloudWatch delivery had stalled, and Streamlit's per-render
+# writes to stdout blocked the process. Through all of it `/_stcore/health` kept answering
+# `ok` often enough to pass, because it is a two-byte constant served by the Tornado server
+# and needs almost nothing of the process behind it. Measured during the incident:
+# `/_stcore/health` flapped between 200 and a timeout, while `/_stcore/host-config` failed
+# every time. It returns a JSON document the server has to assemble, so it exercises more of
+# the process for the same one request.
+#
+# This still does not prove the panels render. Nothing reachable over HTTP does: Streamlit
+# ships the page over a websocket, so the shell HTML is identical whether the script
+# succeeded or raised. What proves the panels is a browser, and that lives in
+# `tests/integration/test_deployed_traversal.py` and in the screenshots. The honest claim for
+# this gate is "the server is alive and assembling responses", which is what it now checks.
+check frontend-cfg   "${FRONTEND_URL}/_stcore/host-config"   '[{]'
+check monitoring-cfg "${MONITORING_URL}/_stcore/host-config" '[{]'
+
 if [ "${fail}" -ne 0 ]; then
   printf 'verify: DEPLOY GATE FAILED -- see docs/runbooks/no-ssh-debug.md\n' >&2
   exit 1

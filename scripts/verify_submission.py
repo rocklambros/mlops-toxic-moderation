@@ -20,6 +20,7 @@ Usage:  python scripts/verify_submission.py [--manifest docs/submission-manifest
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -31,6 +32,19 @@ sys.path.insert(0, str(REPO))
 from scripts.redact import scan  # noqa: E402
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+# The three service addresses README.md publishes. Named here so the check below asserts
+# "these and no others" rather than "none", which stopped being true when the README started
+# publishing them and left this gate printing a green line the repository contradicted.
+PUBLISHED_ENDPOINTS = ("44.239.182.162", "34.210.186.130", "52.43.232.239")
+
+
+def _only_published_endpoints(live: dict) -> bool:
+    """True when every address in the live-URL block is one of the three chosen hosts."""
+    found = set()
+    for field in ("url", "health_url"):
+        found.update(re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", str(live.get(field, ""))))
+    return found <= set(PUBLISHED_ENDPOINTS)
 REQUIRED_SCREENSHOTS = {
     "aws-console-three-ec2-and-rds",
     "live-prototype-on-ec2",
@@ -89,7 +103,10 @@ def main() -> int:
 
     print("\nLive endpoint")
     live = deliverables["live_url"]
-    report.check("<eip-" in live["url"], "no public address is published in the repository")
+    report.check(
+        _only_published_endpoints(live),
+        "the only addresses here are the three service endpoints published on purpose",
+    )
     report.check(bool(live.get("url_parameter")), "a resolvable source is named",
                  live.get("url_parameter", ""))
     report.check(bool(live.get("availability_window")), "availability window is stated")
