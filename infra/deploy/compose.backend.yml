@@ -37,6 +37,8 @@ services:
     logging:
       driver: awslogs
       options:
+        mode: non-blocking
+        max-buffer-size: 4m
         awslogs-region: ${AWS_REGION}
         awslogs-group: ${LOG_GROUP_BACKEND}
         awslogs-stream: backend

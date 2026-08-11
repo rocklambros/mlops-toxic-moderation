@@ -145,7 +145,7 @@ def main() -> None:
             ]
         ),
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
     )
     if all(value is None for value in challenger.values()):
         st.caption(NO_CHALLENGER)

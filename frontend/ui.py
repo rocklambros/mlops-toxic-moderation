@@ -135,7 +135,7 @@ def main() -> None:
     st.caption(max_probability_caption(result["max_prob"]))
 
     st.dataframe(
-        pd.DataFrame(probability_table(result)), hide_index=True, use_container_width=True
+        pd.DataFrame(probability_table(result)), hide_index=True, width="stretch"
     )
 
     st.subheader("Was this decision right?")
@@ -145,9 +145,9 @@ def main() -> None:
     )
     agree, disagree = st.columns(2)
     sent = st.session_state.get("feedback_sent")
-    if agree.button("Agree", disabled=bool(sent), use_container_width=True):
+    if agree.button("Agree", disabled=bool(sent), width="stretch"):
         _send_feedback(result["request_id"], "agree")
-    if disagree.button("Disagree", disabled=bool(sent), use_container_width=True):
+    if disagree.button("Disagree", disabled=bool(sent), width="stretch"):
         _send_feedback(result["request_id"], "disagree")
     if sent:
         st.success(feedback_message(sent))
