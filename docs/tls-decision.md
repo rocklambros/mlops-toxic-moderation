@@ -111,7 +111,7 @@ moderation service:
 - **The high-value surface is structurally out of reach**, not merely restricted. Port 8503
   has no ingress rule on any security group, so the reviewer shared secret and the raw
   moderation queue never touch a cleartext listener regardless of what the demo window does.
-- **The whole stack is destroyed after grading**, and the exposure ends with it.
+- **The exposure is finite.** The stack is a course project, not a service with a roadmap. It is retired when the project is, and the exposure ends with it.
 
 What is genuinely worse than the original acceptance, stated rather than smoothed over: the
 window is unbounded in time, unsupervised, and reachable by automated scanners rather than
@@ -163,4 +163,4 @@ Caddy disappears once the deadline has passed.
 ## Disclosure
 
 Stated in `SECURITY.md` as a claim with status **Not true**, in `MODEL_CARD.md` under
-limitations, and in `README.md` beside the live URLs and their availability window.
+limitations, and in `README.md` beside the live URLs.

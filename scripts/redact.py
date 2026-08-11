@@ -75,6 +75,28 @@ ADDRESSES_THAT_STAY = tuple(
     )
 )
 
+# The three service addresses the README publishes on purpose.
+#
+# This is a deliberate reversal of the rule above it, and the reasoning is worth keeping.
+# The redactor originally masked every public address because an address in a public
+# repository advertises a cleartext listener to anything that crawls GitHub. That trade only
+# holds while the addresses are incidental. They are not: this repository IS the submission,
+# the three listeners are open to the internet on purpose, and a reader who cannot reach the
+# running system cannot assess it. An address nobody can find protects nothing and costs the
+# whole demonstration.
+#
+# Narrow on purpose. Each is a single host, enumerated by value, so a fourth address added
+# later is still masked and still has to be argued for. When the Elastic IPs are released
+# these entries should go with them.
+PUBLISHED_ENDPOINTS = frozenset(
+    ipaddress.IPv4Address(host)
+    for host in (
+        "44.239.182.162",  # EC2 #1, FastAPI backend, port 8000
+        "34.210.186.130",  # EC2 #2, Streamlit user interface, port 8501
+        "52.43.232.239",  # EC2 #3, monitoring dashboard, port 8502
+    )
+)
+
 # Names whose value is a credential wherever one is assigned to the other. Deliberately a
 # suffix/prefix match: DEMO_API_KEY, REVIEWER_SHARED_SECRET, POSTGRES_PASSWORD and
 # AWS_SESSION_TOKEN all land here without being enumerated.
@@ -166,6 +188,8 @@ def _is_publishable_address(text: str) -> bool:
         address = ipaddress.IPv4Address(text)
     except ValueError:
         return True  # not an address at all, e.g. a four-component version string
+    if address in PUBLISHED_ENDPOINTS:
+        return True
     return any(address in network for network in ADDRESSES_THAT_STAY)
 
 

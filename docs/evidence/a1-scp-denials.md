@@ -118,7 +118,7 @@ guardrail is missing would do real damage.
 | `DenyRdsCreateWithoutManagedMasterPassword`, `DenyRdsCreatePubliclyAccessible` | RDS has no dry-run. A non-denied call creates a billable database, and the publicly-accessible variant creates an internet-reachable one |
 | `DenyAuroraClusters` | Same — a non-denied `CreateDBCluster` creates a billable Aurora cluster |
 | `DenyOrganizationEscape` | `LeaveOrganization` and `CloseAccount` are irreversible. This is the one guardrail whose failure mode is losing the account |
-| `DenyRdsModifyToPubliclyAccessible`, `DenyInstanceAttributeMutation` | Both target the *running graded stack*. A non-denied call mutates production during the grading window |
+| `DenyRdsModifyToPubliclyAccessible`, `DenyInstanceAttributeMutation` | Both target the *running graded stack*. A non-denied call mutates the running production system |
 
 These rest on policy inspection instead: `tests/unit/test_scp_policy.py` parses
 `infra/aws/scp-sandbox-guardrails.json` and asserts each statement's effect, actions, and
