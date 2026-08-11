@@ -68,7 +68,7 @@ enforces that, and a PARTIAL with no written justification also fails the suite.
 |---|---|---|---|---|
 | 5.1 | `backend/Dockerfile` | Four images, base images pinned by digest; `tests/unit/test_dockerfile_hygiene.py` | PASS | |
 | 5.2 | `infra/terraform/compute.tf` | Three EC2 instances, one component each, rolled by SSM and gated on three live health endpoints | PASS | |
-| 5.3 | `README.md` | Setup, deployment, availability window, and runnable `curl` examples including the 422 and 429 paths | PASS | |
+| 5.3 | `README.md` | Setup, deployment, the three live addresses, four mermaid architecture diagrams, and runnable `curl` examples with real captured responses including the 401 and 422 paths | PASS | |
 
 ## Deliverables
 

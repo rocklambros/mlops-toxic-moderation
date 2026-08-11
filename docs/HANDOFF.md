@@ -37,10 +37,14 @@ done
 ```
 
 **Availability.** Live continuously since 2026-08-02, and reachable from the internet since
-2026-08-10, when `infra/terraform/demo.auto.tfvars` opened the three graded listeners to
-`0.0.0.0/0`. There is no scheduled close: the operator closes it on request after grading.
+2026-08-10, when `infra/terraform/demo.auto.tfvars` opened the three public listeners to
+`0.0.0.0/0`. The service runs continuously and there is no scheduled close.
+
 `docs/tls-decision.md` records what that open-ended cleartext exposure costs and why it is
-accepted; `docs/post-demo-closure.md` owns closing it.
+accepted. When the project is eventually retired, `docs/post-demo-closure.md` is the
+procedure and `make close-demo` runs it: it closes the listeners, rotates the reviewer secret
+and the demo API key, and probes to prove the ports stopped answering. That is an operator
+action taken deliberately, not something scheduled.
 
 ## Resume
 

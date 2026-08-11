@@ -83,7 +83,7 @@ nightly stop schedule closes.
    snapshot preserves the graded dashboard dataset across a teardown.
 2. **The nightly stop schedule** (`nightly_stop_enabled`, default `true`). A hard,
    scheduled stop of all three instances and the database. Disable it deliberately for the
-   grading window and re-enable it afterwards:
+   project is running and re-enable it afterwards:
    `terraform apply -var nightly_stop_enabled=false`.
 3. **The SCP instance-type allowlist** from Phase A1. A hard denial on the rate:
    `t4g.small`, `t4g.medium`, `t4g.large`, `c7g.xlarge` only, GPU and metal denied.
