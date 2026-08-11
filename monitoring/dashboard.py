@@ -266,7 +266,10 @@ def latency_caption(n_buckets: int, sample_counts: list[int] | None = None) -> s
 
 
 def drift_caption(
-    alerting: list[str], alert_psi: float | None = None, n: int | None = None
+    alerting: list[str],
+    alert_psi: float | None = None,
+    n: int | None = None,
+    live_n: int | None = None,
 ) -> str:
     """Say what the comparison rests on, not only what it concluded.
 
@@ -295,6 +298,21 @@ def drift_caption(
             f"comment moves a flag rate by {1.0 / int(n):.0%} at this size, so the bars "
             "below are recent traffic and no PSI alert is claimed from them."
         )
+    # A window dominated by replayed rows cannot carry a drift finding in either direction.
+    # `make seed-demo` replays the locked held-out split, and baseline_flag_rates.json was
+    # computed over that same split, so PSI across those rows compares a distribution with
+    # itself. Reporting "no label exceeds the threshold" over them states a conclusion the
+    # comparison is structurally incapable of reaching.
+    if live_n is not None and n is not None and live_n < int(n):
+        if int(live_n) < MIN_DRIFT_SAMPLES:
+            return (
+                f"{int(n)} predictions in the drift window, but {int(n) - int(live_n)} of "
+                f"them are replayed held-out rows that the baseline was itself computed "
+                f"over -- comparing those against it is a wiring check, not a measurement. "
+                f"Only {int(live_n)} are live traffic, fewer than the {MIN_DRIFT_SAMPLES} "
+                f"this panel requires, so no drift finding is claimed. The bars below are "
+                f"the full window."
+            )
     stated = "." if n is None else f", over {int(n)} predictions in the drift window."
     if not named:
         return f"No label exceeds the PSI alert threshold of {threshold:g}{stated}"
@@ -447,7 +465,13 @@ def render(data: Snapshot) -> None:
     st.header("2. Predicted class distribution (target drift)")
     if data.drift:
         _render_drift(data)
-    st.caption(drift_caption(alerting_labels(data), n=drift_sample_size(data)))
+    st.caption(
+        drift_caption(
+            alerting_labels(data),
+            n=drift_sample_size(data),
+            live_n=drift_live_sample_size(data),
+        )
+    )
 
     st.header("3. Live accuracy from human feedback")
     if data.accuracy.point is not None:
@@ -493,6 +517,11 @@ def drift_sample_size(data: Snapshot) -> int | None:
     """
     rows = data.drift or []
     return rows[0].n if rows else None
+
+
+def drift_live_sample_size(data: "Snapshot") -> int | None:
+    """The live half of the drift denominator, or None if the rows did not record one."""
+    return next((row.live_n for row in (data.drift or [])), None)
 
 
 def _render_drift(data: Snapshot) -> None:

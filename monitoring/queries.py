@@ -102,6 +102,10 @@ class DriftRow:
     # Those are different findings and the rate alone cannot tell them apart. `None` means
     # the count was not recorded, which `drift_report` never does.
     n: int | None = None
+    # How many of those `n` predictions were live traffic rather than rows `make seed-demo`
+    # replayed. The seeded rows ARE the baseline's own sample, so a PSI computed over them
+    # is a wiring check. `live_n` is what a drift claim has to be measured over.
+    live_n: int | None = None
 
 
 def _flag_sum_sql() -> str:
@@ -122,14 +126,28 @@ def _threshold_binds(thresholds: dict[str, float]) -> dict[str, float]:
 
 
 def production_flag_rates(
-    conn, since: dt.datetime, thresholds: dict[str, float]
+    conn, since: dt.datetime, thresholds: dict[str, float], seeded: bool | None = None
 ) -> tuple[int, dict[str, float]]:
+    """Flag rates over the window. `seeded` selects which rows count.
+
+    `None` is every row and is what the panel's headline series uses. `False` is live traffic
+    only, and it exists because `make seed-demo` replays the locked held-out split -- the same
+    split `baseline_flag_rates.json` was computed over. PSI between the seeded rows and that
+    baseline is a comparison of a distribution with itself: zero by construction, and not a
+    statement about production. The live subset is the only part of the window that can carry
+    a drift finding.
+    """
+    predicate = {None: "", False: " AND NOT is_seed", True: " AND is_seed"}[seeded]
     row = conn.execute(
         # `_flag_sum_sql()` emits one `sum(...)` per label from LABELS and compares each
         # probability against a BOUND threshold placeholder; the caller's thresholds reach
-        # the database through `_threshold_binds`, never through the string.
+        # the database through `_threshold_binds`, never through the string. `predicate` is
+        # selected from a literal dict keyed on a bool, so it is not caller text either.
         # nosemgrep: avoid-sqlalchemy-text
-        text(f"SELECT count(*) AS n, {_flag_sum_sql()} FROM predictions WHERE ts >= :since"),
+        text(
+            f"SELECT count(*) AS n, {_flag_sum_sql()} FROM predictions "
+            f"WHERE ts >= :since{predicate}"
+        ),
         {"since": since, **_threshold_binds(thresholds)},
     ).mappings().one()
     n = int(row["n"])
@@ -161,6 +179,7 @@ def drift_report(
     over three comments.
     """
     n, production = production_flag_rates(conn, since, thresholds)
+    live_n, _ = production_flag_rates(conn, since, thresholds, seeded=False)
     rows = []
     for label in LABELS:
         reference = baseline.flag_rates[label]
@@ -179,6 +198,7 @@ def drift_report(
                     and observation_is_improbable(reference, observed, n)
                 ),
                 n=n,
+                live_n=live_n,
             )
         )
     return rows
