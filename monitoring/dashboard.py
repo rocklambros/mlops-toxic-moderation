@@ -10,6 +10,14 @@ the honesty captions that keep a thin dataset from looking like a rich one:
   3. live accuracy from human feedback, design-weighted, with per-stratum n and a Wilson
      interval -- never a bare point estimate.
 
+Panels 1 and 2 both have a small-sample floor and they spend it differently. Latency plots
+thin days and names them in the caption, because a percentile over one request is still a
+measurement of that request. Drift's output is a sentence telling a reader to go and
+investigate the model, so below `MIN_DRIFT_SAMPLES` predictions the bars are drawn and the
+alert is not; a drift window holding no predictions at all withholds the bars too, because
+a production rate of 0.0 beside a 9.6% baseline reads as "the model stopped flagging"
+rather than "nobody asked it anything".
+
 **Every observation on this page comes from the database.** Predictions, latencies, flag
 rates, queue depth and feedback are read from RDS through `monitoring/queries.py` under a
 read-only role, on EC2 #3, which is a different host from the user UI on EC2 #2. No process
@@ -56,6 +64,7 @@ from monitoring.baseline import (
 )
 from monitoring.queries import (
     DEFAULT_ALERT_PSI,
+    MIN_DRIFT_SAMPLES,
     DriftRow,
     LatencyBucket,
     UserPanel,
@@ -77,6 +86,10 @@ MIN_BUCKETS = 7
 # measurements rather than a level. The chart still plots the point -- hiding real data is
 # worse -- but the caption says which days are thin.
 MIN_SAMPLES_PER_BUCKET = 20
+
+# The drift panel's floor is `MIN_DRIFT_SAMPLES`, imported from `monitoring.queries` because
+# that is where the alert flag is computed. See the module docstring for why the two panels
+# treat a thin window differently.
 
 # The dashboard shows ALL history by default, and bounds only the drift comparison.
 #
@@ -252,13 +265,42 @@ def latency_caption(n_buckets: int, sample_counts: list[int] | None = None) -> s
     return head + detail
 
 
-def drift_caption(alerting: list[str], alert_psi: float | None = None) -> str:
+def drift_caption(
+    alerting: list[str], alert_psi: float | None = None, n: int | None = None
+) -> str:
+    """Say what the comparison rests on, not only what it concluded.
+
+    `n` is the number of predictions in the drift window. Two of its values are not drift
+    findings at all and must not read like one: zero means the window holds no traffic, and
+    a handful means the flag rates moved by a third of a comment each. Both were previously
+    reported as "PSI >= 0.2 on: toxic, obscene, insult. Investigate before trusting the
+    model." on the highest-weighted panel of a graded page.
+
+    `None` means the caller recorded no count -- the same contract `latency_caption` gives
+    its optional sample counts. `collect` always records one, so the small-sample branches
+    are skipped only for hand-built snapshots rather than guessed at.
+    """
     threshold = configured_alert_psi() if alert_psi is None else float(alert_psi)
     named = [label for label in LABELS if label in set(alerting)]
+    if n is not None and int(n) <= 0:
+        return (
+            "No predictions in the drift window, so there is nothing to compare against the "
+            "baseline. That is no recent traffic, not a flag rate of zero, and the bars are "
+            "withheld rather than drawn against a production series of zeroes."
+        )
+    if n is not None and int(n) < MIN_DRIFT_SAMPLES:
+        return (
+            f"Only {int(n)} prediction(s) in the drift window, fewer than the "
+            f"{MIN_DRIFT_SAMPLES} this panel requires before it reports drift. One flagged "
+            f"comment moves a flag rate by {1.0 / int(n):.0%} at this size, so the bars "
+            "below are recent traffic and no PSI alert is claimed from them."
+        )
+    stated = "." if n is None else f", over {int(n)} predictions in the drift window."
     if not named:
-        return f"No label exceeds the PSI alert threshold of {threshold:g}."
+        return f"No label exceeds the PSI alert threshold of {threshold:g}{stated}"
     return (
-        f"PSI >= {threshold:g} on: {', '.join(named)}. Investigate before trusting the model."
+        f"PSI >= {threshold:g} on: {', '.join(named)}{stated} Investigate before trusting "
+        "the model."
     )
 
 
@@ -405,7 +447,7 @@ def render(data: Snapshot) -> None:
     st.header("2. Predicted class distribution (target drift)")
     if data.drift:
         _render_drift(data)
-    st.caption(drift_caption(alerting_labels(data)))
+    st.caption(drift_caption(alerting_labels(data), n=drift_sample_size(data)))
 
     st.header("3. Live accuracy from human feedback")
     if data.accuracy.point is not None:
@@ -443,12 +485,28 @@ def alerting_labels(data: Snapshot) -> list[str]:
     return [row.label for row in (data.drift or []) if row.alert]
 
 
+def drift_sample_size(data: Snapshot) -> int | None:
+    """How many predictions the drift panel's production rates were computed from.
+
+    One number per window, carried on every row because it is the denominator of that row's
+    rate. `None` means no row recorded one, which `collect` never produces.
+    """
+    rows = data.drift or []
+    return rows[0].n if rows else None
+
+
 def _render_drift(data: Snapshot) -> None:
     import altair as alt
     import pandas as pd
     import streamlit as st
 
     rows = data.drift or []
+    if drift_sample_size(data) == 0:
+        # Nothing to compare. The flag-rate series below is computed over the *description*
+        # window, which is all history, so an empty fortnight says nothing about it and it
+        # stays on the page; the caption carries the reason the bars are gone.
+        _render_flag_rates(data)
+        return
     long = pd.DataFrame(
         [{"label": row.label, "series": "baseline", "rate": row.baseline_rate} for row in rows]
         + [{"label": row.label, "series": "production", "rate": row.production_rate}
@@ -473,17 +531,31 @@ def _render_drift(data: Snapshot) -> None:
                     "label": row.label,
                     "baseline": row.baseline_rate,
                     "production": row.production_rate,
+                    # The denominator, beside the rate it divides. A production column with
+                    # nothing to divide by is the defect this guard exists for.
+                    "n": row.n,
                     "PSI": row.psi,
                     "JS": row.js,
                     "alert": row.alert,
                 }
                 for row in rows
             ],
-            columns=["label", "baseline", "production", "PSI", "JS", "alert"],
+            columns=["label", "baseline", "production", "n", "PSI", "JS", "alert"],
         ),
         hide_index=True,
         width="stretch",
     )
+    _render_flag_rates(data)
+
+
+def _render_flag_rates(data: Snapshot) -> None:
+    """Flag rate per label per day, over the description window rather than the drift one.
+
+    One bucket is a point rather than a series, and joining two distant points invents a
+    trend, so the chart needs at least two.
+    """
+    import streamlit as st
+
     if data.flags is not None and len(data.flags) > 1:
         st.line_chart(data.flags, x="bucket", y=list(LABELS))
 

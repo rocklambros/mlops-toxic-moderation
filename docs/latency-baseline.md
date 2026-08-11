@@ -7,7 +7,7 @@ inserts; the client round trip additionally includes serialization and the commi
 
 | Measure | p50 | p95 | p99 |
 |---|---|---|---|
-| stamped `latency_ms` | 16 ms | 19 ms | 20 ms |
+| stamped `latency_ms` | 16 ms | 18 ms | 20 ms |
 | client round trip | - | 27 ms | - |
 
 Budget: p95 under 500 ms. Result: PASS.

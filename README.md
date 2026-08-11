@@ -234,8 +234,10 @@ queue counter moves after you try it.
 
 **The refusals, so the error messages are not a surprise.** Requests with no key are refused
 before the body is parsed. The input cap is `MAX_INPUT_CHARS`, 5000 characters, enforced by
-the request schema. Bodies are separately capped at 16 KB and each key is limited to 30
-requests per minute.
+the request schema. Bodies are separately capped at 16 KB, and each caller is limited to 30
+requests per minute with a burst of 10. The limit is per caller rather than per API key, so
+one visitor holding the button cannot rate limit the next one, and a looser ceiling on the
+source address sits behind it.
 
 ```bash
 # no key
@@ -364,7 +366,7 @@ dashboard prints how many of the displayed rows came from the replay at the top 
 Seeding the deployed stack is an operator procedure with two wrinkles worth knowing, both
 documented in [`docs/evidence/p5-deploy-traversal.md`](docs/evidence/p5-deploy-traversal.md):
 RDS is private so the seeder reaches it through an SSM port-forward, and replaying 2,000
-comments from one address trips the per-key rate limit, which is raised for the window and
+comments from one address trips the per-caller rate limit, which is raised for the window and
 restored afterwards. That restore is a visible operator action rather than a retry loop
 inside the seeder, because an abuse control a tool quietly works around is not a control.
 

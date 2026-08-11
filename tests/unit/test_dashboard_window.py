@@ -11,6 +11,12 @@ The second half of this file is about a different lie the same chart told. Laten
 at 17.0 ms on all seven days that carried traffic. Then eight idle days, then a single
 cold-start request at 114 ms. A line chart joined the last real day to that one sample and
 drew a smooth 5x ramp across a week in which nothing happened at all.
+
+The third is the drift window's turn at the same failure. That window stayed bounded on
+purpose, so it is the one that still runs dry -- and a caption that says "no label exceeds
+the threshold" or "PSI >= 0.2 on: toxic, obscene, insult" over three hand-typed comments is
+reporting the window again. `tests/unit/test_drift_small_sample.py` holds the guard itself;
+these are the sentences a reader sees.
 """
 
 import datetime as dt
@@ -20,8 +26,10 @@ import pytest
 from monitoring.dashboard import (
     BEGINNING_OF_TIME,
     DEFAULT_DRIFT_WINDOW_DAYS,
+    MIN_DRIFT_SAMPLES,
     MIN_SAMPLES_PER_BUCKET,
     Snapshot,
+    drift_caption,
     drift_window_days,
     latency_caption,
     window_caption,
@@ -153,3 +161,49 @@ def test_the_caption_survives_being_given_no_counts():
     caption = latency_caption(8)
     assert "8 daily buckets" in caption
     assert "min" not in caption
+
+
+# --------------------------------------------------------------------- the drift caption
+
+
+def test_an_empty_drift_window_is_reported_as_no_traffic_not_as_no_drift():
+    """"No label exceeds the PSI alert threshold" over zero predictions is a finding of
+    stability drawn from silence. The two states have to read differently, because one of
+    them means the reader should go and look at why traffic stopped."""
+    caption = drift_caption([], alert_psi=0.2, n=0)
+    assert "No predictions in the drift window" in caption
+    assert "No label exceeds" not in caption
+
+
+def test_a_handful_of_predictions_cannot_carry_a_drift_alert():
+    """Even handed the alerting labels, the caption refuses the sentence. The query layer
+    already withholds the flag; this is the second half of the same rule, so a hand-built
+    row that claims an alert cannot put "investigate the model" on the screenshot over
+    three comments."""
+    caption = drift_caption(["toxic", "obscene", "insult"], alert_psi=0.2, n=3)
+    assert "Only 3 prediction(s) in the drift window" in caption
+    assert str(MIN_DRIFT_SAMPLES) in caption
+    assert "PSI >=" not in caption
+    assert "Investigate" not in caption
+
+
+def test_the_drift_caption_reports_its_denominator_the_way_the_latency_caption_does():
+    """The latency caption names requests per day. Until this one named n, the highest-
+    weighted panel on the page was the only one whose reader could not tell how much
+    traffic it stood on."""
+    assert "1200 predictions" in drift_caption([], alert_psi=0.2, n=1200)
+    assert "1200 predictions" in drift_caption(["toxic"], alert_psi=0.2, n=1200)
+
+
+def test_the_drift_caption_still_names_the_labels_when_the_window_is_populated():
+    """Mirror of the small-sample tests: the alert has to survive having enough evidence."""
+    caption = drift_caption(["toxic", "insult"], alert_psi=0.2, n=1200)
+    assert "PSI >= 0.2 on: toxic, insult" in caption
+    assert "Investigate before trusting the model" in caption
+
+
+def test_the_drift_caption_survives_being_given_no_count():
+    """Same contract as `latency_caption`'s optional counts: `None` is "not recorded", and
+    the small-sample branches are skipped rather than guessed at."""
+    assert drift_caption([], alert_psi=0.2) == "No label exceeds the PSI alert threshold of 0.2."
+    assert "PSI >= 0.2 on: toxic." in drift_caption(["toxic"], alert_psi=0.2)
