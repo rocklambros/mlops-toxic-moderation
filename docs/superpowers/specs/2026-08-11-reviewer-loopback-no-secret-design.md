@@ -1,12 +1,64 @@
 # Design Spec: Delete the Reviewer Shared Secret by Moving the Boundary
 
-- Version: 1.0
+- Version: 2.0
 - Owner: Rock Lambros
 - Date: 2026-08-11
-- Status: approved for planning
-- Amends: `docs/tls-decision.md`, `SECURITY.md`, `infra/exposure.py`
-- Scope: remove `REVIEWER_SHARED_SECRET` from the system entirely, replacing it with a network
-  boundary no credential is needed to cross
+- Status: **REFUTED and not implemented.** Superseded by
+  `2026-08-11-review-exposure-and-graded-panels-design.md`
+- Scope as originally written: remove `REVIEWER_SHARED_SECRET` entirely, replacing it with a
+  network boundary no credential is needed to cross
+
+## 0. Why this was not built
+
+An adversarial premortem on 2026-08-11 ran six independent perspectives against this document
+at commit `721c7f4`. Every load-bearing claim below was then verified directly against the
+live account rather than taken from the review. Four findings are independently fatal, and the
+document is kept rather than deleted because the reasoning is the useful part.
+
+**The move reverses premortem H16, which is the reason the three-tier split exists.**
+`infra/terraform/iam.tf:165` grants the frontend tier "the demo API key and **NOTHING ELSE**";
+the backend tier holds the W&B key, the read-only database secret, the demo key, the
+fingerprint key and the RDS master secret. `infra/terraform/network.tf:278` gives the frontend
+group no 5432 rule and says that is the point. The reviewer console renders attacker-chosen
+text (`frontend/render.py`: "Inputs here are adversarial by definition"). Section 8 below asked
+whether EC2 #1 had *memory* for the console and never asked what the console would gain access
+to by being there. This is a bad trade on the merits, not a risk to be mitigated.
+
+**The deploy is blocked three ways, and unblocking it requires weakening the control above.**
+`infra/deploy/instance/roll.sh:186` writes `unresolved_image REVIEWER_IMAGE` on the backend
+branch; `iam.tf:67` scopes the backend role to the backend ECR repository while the console
+image is built into the frontend repository (`roll.sh:195`); `roll.sh:261` writes
+`frontend.env`, which the console needs, only on the frontend branch. Section 7's "Terraform
+runs after" ordering is therefore impossible: the IAM grant is a prerequisite of the move.
+
+**Section 3.1's central factual claim is false.** The backend runs Docker Engine **25.0.16**,
+verified over SSM. Docker began blocking direct-routed traffic to unpublished container ports
+in Engine 28. The host reaches container addresses on the bridge regardless of publishing, so
+"a stricter boundary than a `127.0.0.1` bind" is backwards — a loopback publish is reachable
+only from host loopback, while an unpublished port is reachable from the bridge and from every
+container on it. The argument for deleting the credential rested on a property this system
+does not have.
+
+**Rollback breaks inside the window this change would open.** `infra/terraform/data.tf:113`
+sets `recovery_window_in_days = 7`, so deleting the secret on 2026-08-11 makes its name
+unusable until 2026-08-18, which is the due date. Independently, `scripts/close_demo.sh:64`
+rotates `reviewer-shared-secret` first under `set -e`, so deleting it aborts the closure script
+before `demo-api-key` — the credential that did cross a cleartext listener — is ever rotated.
+
+**And the premise was weaker than section 1 states.** The secret is not redundant.
+`infra/deploy/compose.frontend.yml:38-43` confirms it is not present on the frontend host at
+all, so it is the only control separating a compromised public-UI container from the reviewer
+API. Section 1's first argument — that the secret "does not authenticate anybody" — conflates
+*authenticating no one among several reviewers* with *authenticating no one*. It authenticates
+the holder, which is the only distinction a single-principal system needs.
+
+What survives is section 1's third argument alone: the reviewer routes answer the internet
+because they share a listener with `/predict`. The successor spec closes exactly that, with a
+peer guard on the existing app, and leaves the credential in place.
+
+---
+
+*Original document follows, unchanged.*
 
 ## 1. Why this exists
 
