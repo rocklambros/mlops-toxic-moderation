@@ -129,9 +129,27 @@ test set.
 ### How the numbers were produced
 
 - **The model was chosen by 5-fold cross-validation on the training split only.** The held-out
-  test set was scored **once**, on the already-chosen model, through a durable ledger
-  ([`docs/test-set-touch-log.md`](docs/test-set-touch-log.md)) that refuses a second entry for
-  the same `split_version`. The test set never chose anything.
+  test set was scored **once for metrics**, on the already-chosen model, through a durable
+  ledger ([`docs/test-set-touch-log.md`](docs/test-set-touch-log.md)) that refuses a second
+  entry for the same `split_version`. Every number in section 3 comes from that one scoring,
+  and the test set never chose the model.
+
+  **Where that claim needs qualifying, stated rather than left for a reader to find.**
+  `make seed-demo` replays 2000 rows of the same held-out split through the deployed
+  `/predict` to populate the monitoring dashboard, and the ledger does not see it: the ledger
+  guards `model/evaluate.py`, and the replay goes over HTTP. Two consequences, and only the
+  second is a real qualification.
+
+  The dashboard numbers are not a second estimate of held-out performance and are not
+  reported as one. They are a live-traffic panel that happens to be fed by held-out text,
+  which is disclosed on the page itself and in `README.md`.
+
+  The `REVIEW_FLOOR_RATIO` fix in section 4 is the exception. Its effect was measured on
+  those replayed rows, so a decision about the decision policy was informed by held-out data.
+  That is the selection the ledger exists to prevent, applied to a threshold rather than to a
+  model. The fix was correcting an unreachable `allow` branch rather than tuning for a score,
+  and the measurement is reported as an observation rather than as a held-out metric, but it
+  is not covered by the sentence above and should not shelter under it.
 - **Intervals are stratified percentile bootstraps, 1000 replicates, seed 42.** Per-label
   intervals resample the positive and negative strata separately so no replicate can lose every
   positive of a 99-positive label and score 0.0 on a warning. Aggregate intervals resample
