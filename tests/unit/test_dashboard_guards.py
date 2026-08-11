@@ -27,6 +27,7 @@ from monitoring.dashboard import (
     REFERENCE_UNAVAILABLE,
     Snapshot,
     accuracy_caption,
+    accuracy_floor_notice,
     accuracy_metric,
     alerting_labels,
     drift_caption,
@@ -54,6 +55,7 @@ XSS = "<img src=x onerror=alert(1)>"
 VETTED_FORMATTERS = frozenset(
     {
         "accuracy_caption",
+        "accuracy_floor_notice",
         "accuracy_metric",
         "drift_caption",
         "latency_caption",
@@ -170,6 +172,14 @@ def test_accuracy_metric_refuses_anything_that_is_not_a_number():
     assert accuracy_metric(0.8333) == "83.3%"
     with pytest.raises(ValueError):
         accuracy_metric(XSS)
+
+
+def test_accuracy_floor_notice_refuses_anything_that_is_not_a_number():
+    """Mirror of the guard above: `int(report.n)` fails closed on adversarial input, which
+    is what lets this formatter sit in VETTED_FORMATTERS beside accuracy_metric."""
+    bad = AccuracyReport(n=XSS, point=1.0, lo=0.2, hi=1.0, effective_n=1.0, strata=[])
+    with pytest.raises(ValueError):
+        accuracy_floor_notice(bad)
 
 
 def test_latency_caption_requires_seven_buckets_before_claiming_a_trend():

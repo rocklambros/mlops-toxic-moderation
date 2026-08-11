@@ -91,6 +91,15 @@ MIN_SAMPLES_PER_BUCKET = 20
 # that is where the alert flag is computed. See the module docstring for why the two panels
 # treat a thin window differently.
 
+# The floor Panel 3 did not have. Matched to MIN_DRIFT_SAMPLES rather than chosen freshly:
+# both answer the same question -- how many observations before a proportion is reported as
+# a finding -- and two different numbers for one question invite the smaller to be quoted.
+#
+# Counted on reviewed rows, not on the Kish effective size. `effective_n` falls below the raw
+# count when the design weights are uneven, which would make the floor bite hardest exactly
+# when the random-audit stratum is doing its job.
+MIN_REVIEWED_FOR_ESTIMATE = 30
+
 # The dashboard shows ALL history by default, and bounds only the drift comparison.
 #
 # It used to bound everything with one 14-day `since` threaded into all seven queries. Only
@@ -231,6 +240,20 @@ def accuracy_metric(point: float) -> str:
     """The one number a grader reads off the screenshot. `float()` refuses a string, so
     nothing but a number can reach the widget."""
     return f"{float(point):.1%}"
+
+
+def accuracy_is_reportable(report: AccuracyReport) -> bool:
+    """Whether the headline metric may be drawn, as opposed to the caption and the strata."""
+    return report.point is not None and int(report.n) >= MIN_REVIEWED_FOR_ESTIMATE
+
+
+def accuracy_floor_notice(report: AccuracyReport) -> str:
+    return (
+        f"{int(report.n)} reviewed item(s), fewer than the {MIN_REVIEWED_FOR_ESTIMATE} this "
+        f"panel requires before it prints a headline accuracy. The per-stratum detail and "
+        f"the confidence interval are below; the point estimate is withheld because at this "
+        f"size it is one reviewer's opinion rendered as a percentage."
+    )
 
 
 def latency_caption(n_buckets: int, sample_counts: list[int] | None = None) -> str:
@@ -474,8 +497,10 @@ def render(data: Snapshot) -> None:
     )
 
     st.header("3. Live accuracy from human feedback")
-    if data.accuracy.point is not None:
+    if accuracy_is_reportable(data.accuracy):
         st.metric("Live accuracy (design-weighted)", accuracy_metric(data.accuracy.point))
+    elif data.accuracy.point is not None:
+        st.info(accuracy_floor_notice(data.accuracy))
     st.caption(accuracy_caption(data.accuracy))
     if data.accuracy.strata:
         st.dataframe(
