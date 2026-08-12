@@ -64,9 +64,14 @@ graded feedback metric, answered 200.
 
 Two things follow, and neither is walked back anywhere else in this document:
 
-- **A credential does cross a cleartext listener.** The reviewer shared secret is POSTed to
-  `/review/login` on 8000. A network observer on the path reads it, and with it can read the
-  moderation queue and write the graded feedback metric.
+- **A credential crosses a cleartext listener, inside the VPC.** The reviewer shared secret is
+  POSTed to `/review/login`, and until 2026-08-11 that route answered the internet. It no
+  longer does: `backend/app.py` refuses any `/review/*` request from a globally routable peer
+  with a 404. What remains is a private hop in cleartext -- the console posts to the backend's
+  private address -- so an observer inside the VPC reads it and an observer outside cannot
+  reach the route at all. No path this project operates ever sent the secret across the public
+  listener; the exposure was that the route *accepted* it, which made it brute-forceable
+  online, and `backend/review_api.py:161` metered that at five attempts a minute per peer.
 - **The reviewer capability is restricted, not structurally out of reach.** What is
   structurally out of reach is the Streamlit console that renders it.
 
@@ -81,7 +86,8 @@ exposure and it is not TLS: it does not stop an observer reading the secret in f
 | Listener | Port | Ingress as of 2026-08-10 | Carries |
 |---|---|---|---|
 | FastAPI `/predict`, `/health` | 8000 | **`0.0.0.0/0`** plus the operator address | Comment text submitted by anyone holding the demo API key |
-| **FastAPI reviewer and feedback routes** | **8000, the same listener** | **`0.0.0.0/0`** plus the operator address | **The reviewer shared secret on `/review/login`, a bearer session token, and raw comment text from `/review/pending`** |
+| **FastAPI reviewer routes** | **8000, the same listener** | **VPC peers only** -- a globally routable peer gets 404 (`backend/app.py`) | **The reviewer shared secret on `/review/login`, a bearer session token, and raw comment text from `/review/pending`** |
+| FastAPI `/feedback/user` | 8000, the same listener | **`0.0.0.0/0`** plus the operator address | An anonymous agree/disagree verdict, behind the demo key. Graded under rubric 3.2 |
 | Streamlit user UI | 8501 | **`0.0.0.0/0`** plus the operator address | The same text and the returned probabilities |
 | Monitoring dashboard | 8502 | **`0.0.0.0/0`** plus the operator address | Aggregated counts, latencies and rates. No raw comment text |
 | **Reviewer console (Streamlit)** | **8503** | **none, on any security group** | **The same secret and comment text, over an SSM tunnel** |
@@ -106,6 +112,15 @@ aws ssm start-session --target "$INSTANCE_ID" \
 That tunnel carries the console. It does not carry the console's API calls, which go from the
 frontend instance to the backend instance on 8000, and it does not change where a reviewer
 signing in from that console sends the shared secret.
+
+This narrows the exposure; it does not remove the credential, and the reason is worth
+recording. The user-facing Streamlit and the reviewer console share EC2 #2 and therefore share
+one security group, so the internet-facing container reaches these routes from a private
+address and the peer guard does not see it. The shared secret is the only control on that path.
+A 2026-08-11 design that would have removed it -- by relocating the console and serving the
+routes on an unpublished port -- was refuted: it moved an adversarial-input renderer onto the
+tier that holds the RDS master credential, reversing premortem H16. See
+`docs/superpowers/specs/2026-08-11-reviewer-loopback-no-secret-design.md` section 0.
 
 ## Alternatives considered and why each was rejected
 
