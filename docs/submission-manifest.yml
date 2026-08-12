@@ -91,6 +91,34 @@ deliverables:
           synthetic insult typed by the operator for this capture, not a third party's
           submission drawn from the database.
 
+      - id: reviewer-console-queue
+        path: docs/evidence/screenshots/reviewer-console-queue.png
+        redacted_account_id: true
+        contains_raw_user_text: false
+        shows: >-
+          The reviewer console, signed in, working the live queue. This is the human-review
+          workflow the topic line names, and it is the one interface an instructor cannot
+          reach: port 8503 carries no ingress rule on any security group and binds loopback
+          on the host, so it is reached only over an SSM port forward by an operator holding
+          IAM credentials for this account. The screenshot exists because that is a
+          deliberate control rather than an oversight, and evidence is the honest substitute
+          for access. What the aggregate view of the same workflow looks like is section 4
+          of the monitoring dashboard, which is public.
+
+          The comment itself is replaced in the DOM before capture and reads "comment text
+          withheld from the public evidence pack". Every pending item in this queue is
+          traffic this project generated while testing, not a third party's, but the field
+          above is a binary declaration and this pack is public: cropping the one line that
+          could ever carry submitted text is cheaper than reasoning about which items are
+          safe. Nothing else on the page is user input -- the six label names, the
+          probabilities, the controls.
+
+          Note the six checkboxes are unchecked. They are never pre-filled from the model's
+          own scores: the quantity being measured is agreement between the human and the
+          model, so a model-derived default would manufacture the numerator of the graded
+          accuracy metric. The chart holds label order rather than sorting by probability, so
+          the same label sits in the same row on every item a reviewer works through, and the
+          legend shows only the production series because this item has no challenger scores.
       - id: monitoring-dashboard-populated
         path: docs/evidence/screenshots/monitoring-dashboard-populated.png
         redacted_account_id: true

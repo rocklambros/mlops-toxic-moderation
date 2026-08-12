@@ -68,6 +68,26 @@ The reviewer console on 8503 has no ingress rule on any security group. It is re
 through an SSM port-forward session. [`infra/exposure.py`](infra/exposure.py) is the single
 source of truth for which port is public, and a test holds the Terraform to it.
 
+That means the human-review workflow is the one part of this system you cannot open in a
+browser, and the reason is deliberate: the console writes the labels that live accuracy is
+computed from, so a port anyone can reach is a graded metric anyone can write. Two things
+stand in for access.
+
+**The workflow itself is on the public dashboard.** Section 4 of
+[the monitoring dashboard](http://52.43.232.239:8502) shows the sampling design — flagged
+items, a random audit sample, and user referrals — and per-label agreement between the
+reviewer and the model. Those are the questions the console exists to answer, and they carry
+no comment text, which is why they can be published.
+
+**The interface itself is captured here:**
+[`docs/evidence/screenshots/reviewer-console-queue.png`](docs/evidence/screenshots/reviewer-console-queue.png).
+Signed in, working the live queue, with the comment line withheld — every pending item is
+traffic this project generated while testing, but the evidence pack is public and cropping
+the one field that could ever carry a submitted comment is cheaper than reasoning about
+which items are safe. Note the six checkboxes are unchecked: they are never pre-filled from
+the model's scores, because the number being measured is agreement between the human and the
+model and a model-derived default would manufacture it.
+
 ## For the instructor
 
 Every requirement, and the fastest way to confirm it.
