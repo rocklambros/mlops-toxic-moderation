@@ -114,3 +114,49 @@ def test_the_ui_module_holds_no_database_import():
         assert forbidden not in SOURCE, (
             "the user UI must reach Postgres only through the backend API (H12/H16)."
         )
+
+
+# --------------------------------------------------------------- the probability chart
+#
+# Asserted over the SOURCE, not by executing it. Neither altair, streamlit nor pandas is in
+# the dev environment -- that absence is deliberate, and is exactly what lets
+# `test_no_unsafe_html.py` prove this module imports without a UI stack -- so
+# `probability_chart` cannot be called from here. `tests/unit/test_dashboard.py` solves the
+# same problem the same way, with `ast` over the file.
+#
+# The weakness is worth stating rather than hiding: this proves the chart is SPECIFIED
+# correctly, not that altair renders it. Rendering is covered by loading the deployed page.
+
+UI_SOURCE = Path("frontend/ui.py").read_text(encoding="utf-8")
+_CHART_SRC = UI_SOURCE[
+    UI_SOURCE.index("def probability_chart") : UI_SOURCE.index("def feedback_message")
+]
+
+
+def test_the_bars_are_ordered_by_probability():
+    """This chart answers "what drove the decision", and the answer is whichever bars are
+    longest. LABELS order would bury a flagged `threat` in fourth position."""
+    assert 'sort="-x"' in _CHART_SRC, "the bars are not ordered by magnitude"
+
+
+def test_colour_encodes_the_flag_rather_than_the_probability():
+    """The decision rule is a per-label threshold: `threat` flags at 0.05 while `toxic` can
+    sit unflagged at 0.30. A gradient over probability would draw one cutoff across all six,
+    and a reader would infer a boundary the system does not use."""
+    colour = _CHART_SRC[_CHART_SRC.index("color=") : _CHART_SRC.index("tooltip=")]
+    assert '"status:N"' in colour, "colour does not encode the flag"
+    assert '"probability' not in colour, "colour is encoding the probability"
+
+
+def test_the_probability_axis_is_pinned_to_zero_one():
+    """An autoscaled axis makes a 0.05 threat probability look like a large value."""
+    assert "domain=[0, 1]" in _CHART_SRC, "the probability axis autoscales"
+
+
+def test_the_chart_is_fed_only_the_text_free_table():
+    """The comment reaches exactly one sink, the inert renderer. A chart embeds its data in
+    the page as JSON, so feeding it anything but `probability_table` output would be a second
+    rendering path with different escaping rules and no test over it."""
+    assert "rows = probability_table(result)" in UI_SOURCE
+    assert "st.altair_chart(probability_chart(rows)" in UI_SOURCE
+    assert "submitted_text" not in _CHART_SRC, "the chart function can see the comment text"
