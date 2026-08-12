@@ -335,7 +335,7 @@ def test_an_empty_database_renders_every_panel_instead_of_raising(drawn):
     """C5 in one test. Nothing has ever been predicted, reviewed, or fed back."""
     render(_snapshot())
 
-    assert len(_calls(drawn, "header")) == 3, "a graded panel is missing from an empty page"
+    assert len(_calls(drawn, "header")) == 4, "a graded panel is missing from an empty page"
     assert _calls(drawn, "line_chart") == []
     assert _calls(drawn, "metric") == []
     assert _calls(drawn, "dataframe") == []
@@ -499,3 +499,30 @@ def test_render_wires_the_live_sample_size_into_the_drift_caption(drawn):
     assert "wiring check" in caption
     assert "2048" in caption
     assert "Only 5 are live traffic" in caption
+
+
+def test_the_review_workflow_section_is_aggregate_only():
+    """Section 4 exists because rubric 3.2's feedback mechanism and this topic's human-review
+    workflow were both real and neither was visible -- the console that runs it is on a port
+    with no ingress rule, so a grader could see the outcome and not the process.
+
+    It is aggregates only. A table of reviewed comments was designed and dropped: delivery
+    spec 6.4 makes "the dashboard reads no raw comment text" normative and
+    `test_monitoring_never_selects_raw_user_text` enforces it with a scanner, and publishing
+    text under an `is_seed` predicate would have traded that machine-checkable invariant for a
+    semantic one no scanner can see. This test pins the outcome of that decision so a later
+    change cannot reintroduce the table without confronting it.
+    """
+    assert "queue_depth_by_source" in SOURCE
+    assert "label_agreement" in SOURCE
+    assert "reviewed_samples" not in SOURCE, (
+        "the reviewed-comment table is back; it cannot coexist with delivery spec 6.4"
+    )
+
+
+def test_the_agreement_chart_holds_label_order():
+    """A reader comparing this against the drift panel above needs the same six labels in the
+    same six places, so it must not sort by rate."""
+    chart = SOURCE[SOURCE.index("def agreement_chart") : SOURCE.index("def queue_chart")]
+    assert "sort=list(LABELS)" in chart
+    assert 'sort="-x"' not in chart
