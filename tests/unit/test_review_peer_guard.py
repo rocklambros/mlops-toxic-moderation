@@ -5,7 +5,11 @@ tell the moderation queue from the prediction endpoint.
 Every legitimate caller is inside the VPC -- roll.sh points the console at the backend's
 private address -- so a public peer on /review/* is by definition not the console.
 
-404 rather than 403: the response should not confirm the route exists.
+404 rather than 403: not because the response should conceal that the route exists --
+`/openapi.json` lists all four reviewer routes, unauthenticated, with
+`include_in_schema=True`, so that ship sailed already. The 404 instead removes the online
+brute-force surface against the shared secret and refuses the capability outright, rather
+than confirming a locked door a caller could keep knocking on.
 
 This does NOT remove the shared secret and does not pretend to. The public UI container
 shares the frontend instance's security group, so it reaches these routes from a private

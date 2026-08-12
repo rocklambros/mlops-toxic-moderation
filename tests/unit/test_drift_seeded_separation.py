@@ -78,19 +78,43 @@ def test_drift_rows_carry_the_live_denominator_beside_the_full_one():
     assert rows["toxic"].live_n == 48
 
 
-def test_a_seed_dominated_window_is_not_reported_as_a_drift_finding():
-    """The exact live shape on 2026-08-11: 2048 rows, 2000 of them replayed reference data."""
-    caption = drift_caption([], alert_psi=0.2, n=2048, live_n=20)
-    assert "replayed" in caption
-    assert "20" in caption
+def test_a_genuinely_under_floor_live_count_blocks_the_finding():
+    """Live traffic itself below MIN_DRIFT_SAMPLES is the one case where no drift finding of
+    either polarity may be reported: the live traffic alone is too thin to say anything,
+    never mind what the 2000 replayed rows behind it would dilute it with."""
+    caption = drift_caption([], alert_psi=0.2, n=2048, live_n=5)
+    assert "wiring check" in caption
+    assert "Only 5 are live traffic" in caption
     assert "No label exceeds" not in caption, (
-        "a window whose rows ARE the reference distribution cannot support that claim"
+        "a window whose live traffic itself is below the floor cannot support that claim"
     )
 
 
-def test_a_window_with_enough_live_traffic_still_reports_normally():
+def test_a_seed_dominated_window_discloses_both_denominators():
+    """The exact live shape on 2026-08-11: 2048 rows, 2000 of them replayed reference data,
+    48 live. 48 clears MIN_DRIFT_SAMPLES, so the panel is not blocked from reporting -- but a
+    caption naming only "2048 predictions" would read as 2048 independent observations, when
+    2000 of them are the baseline's own sample replayed back through the API. Both
+    denominators, not just the total, have to survive into the rendered sentence: a
+    substring check against "48" alone would pass by matching inside "2048" too, so this
+    pins the exact wording instead.
+    """
+    caption = drift_caption([], alert_psi=0.2, n=2048, live_n=48)
+    assert "No label exceeds the PSI alert threshold of 0.2" in caption
+    assert "over 2048 predictions in the drift window" in caption
+    assert "48 are live traffic" in caption
+    assert "2000 are replayed rows the baseline was computed over" in caption
+    assert "dominated by its own reference sample" in caption
+
+
+def test_a_window_just_above_the_floor_still_discloses_both_denominators():
+    """Clearing MIN_DRIFT_SAMPLES does not mean little was replayed: 31 live out of 2048 is
+    still 98% seeded, so the disclosure this file is about applies at any live_n < n, not
+    only below the floor -- which is exactly the gap the fix closes over the old behavior."""
     caption = drift_caption([], alert_psi=0.2, n=2048, live_n=MIN_DRIFT_SAMPLES + 1)
     assert "No label exceeds" in caption
+    assert f"{MIN_DRIFT_SAMPLES + 1} are live traffic" in caption
+    assert "2017 are replayed rows the baseline was computed over" in caption
 
 
 def test_an_unseeded_window_is_unaffected():

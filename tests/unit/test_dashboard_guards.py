@@ -309,10 +309,15 @@ def _bucket(day: int) -> LatencyBucket:
     )
 
 
-def _drift(rate: float = 0.0, alert: bool = False) -> list[DriftRow]:
+def _drift(
+    rate: float = 0.0,
+    alert: bool = False,
+    n: int | None = None,
+    live_n: int | None = None,
+) -> list[DriftRow]:
     return [
         DriftRow(label=label, baseline_rate=0.1, production_rate=rate, psi=0.0, js=0.0,
-                 alert=alert)
+                 alert=alert, n=n, live_n=live_n)
         for label in LABELS
     ]
 
@@ -479,3 +484,18 @@ def test_alerting_labels_is_empty_when_there_is_no_drift_panel():
     assert alerting_labels(_snapshot()) == []
     assert alerting_labels(_snapshot(drift=_drift(alert=False))) == []
     assert alerting_labels(_snapshot(drift=_drift(alert=True))) == list(LABELS)
+
+
+def test_render_wires_the_live_sample_size_into_the_drift_caption(drawn):
+    """`render` has to pass `live_n=` through to `drift_caption`, not just `n=`. A snapshot
+    whose rows carry `n=2048, live_n=5` -- 2043 replayed rows, 5 live -- can only produce the
+    seed-dominated "wiring check" wording if that keyword argument survives the call in
+    `render`. Deleting it silently falls back to `drift_caption`'s `live_n=None` default,
+    which reports this exact seed-dominated window as an ordinary 2048-prediction
+    measurement with no caveat at all -- the regression `test_drift_seeded_separation.py`
+    cannot catch, because it calls `drift_caption` directly and never exercises `render`."""
+    render(_snapshot(drift=_drift(n=2048, live_n=5)))
+    caption = _captions(drawn)
+    assert "wiring check" in caption
+    assert "2048" in caption
+    assert "Only 5 are live traffic" in caption

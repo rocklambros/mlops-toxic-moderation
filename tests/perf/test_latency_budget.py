@@ -103,6 +103,23 @@ def test_p95_latency_under_budget(client):
     budget = client.app.state.settings.latency_budget_p95_ms
     previous = _committed_p95()
 
+    print(f"\nlatency p50={p50:.1f}ms p95={p95:.1f}ms p99={p99:.1f}ms (committed {previous})")
+    assert p95 < budget, f"p95 {p95:.1f} ms exceeds the {budget} ms budget"
+
+    if previous is not None:
+        ceiling = max(previous * REGRESSION_MULTIPLIER, previous + REGRESSION_FLOOR_MS)
+        assert p95 <= ceiling, (
+            f"p95 regressed: {p95:.1f} ms against a committed baseline of {previous:.1f} ms "
+            f"(ceiling {ceiling:.1f} ms). Re-run with {UPDATE_ENV}=1 to accept the new number "
+            f"if the change is intended."
+        )
+
+    # Written only now, after both assertions above have passed. Until 2026-08-11 the write
+    # happened before them, so a regressed run baked its own bad p95 into the committed
+    # document while still failing this test -- and the *next* `make loadtest` then compared
+    # a fresh run against the number the failing run had just written, 499 against 499,
+    # green. A run that fails never reaches this line, so the document can only ever record a
+    # number this same run has already vouched for.
     if os.environ.get(UPDATE_ENV):
         with client.app.state.engine.connect() as conn:
             rows = conn.execute(text("SELECT count(*) FROM predictions")).scalar()
@@ -148,17 +165,13 @@ def test_p95_latency_under_budget(client):
             "Phase 1 registers one, and record the result here before the graded demo.\n",
             encoding="utf-8",
         )
-
-    print(f"\nlatency p50={p50:.1f}ms p95={p95:.1f}ms p99={p99:.1f}ms (committed {previous})")
-    assert p95 < budget, f"p95 {p95:.1f} ms exceeds the {budget} ms budget"
-
-    if previous is not None:
-        ceiling = max(previous * REGRESSION_MULTIPLIER, previous + REGRESSION_FLOOR_MS)
-        assert p95 <= ceiling, (
-            f"p95 regressed: {p95:.1f} ms against a committed baseline of {previous:.1f} ms "
-            f"(ceiling {ceiling:.1f} ms). Re-run with {UPDATE_ENV}=1 to accept the new number "
-            f"if the change is intended."
-        )
+        # The accept path used to be silent: a passing `make loadtest` with UPDATE_ENV set
+        # would rewrite the document and say nothing about what changed, so telling a
+        # 1 ms wobble from a deliberate 50 ms improvement meant opening a diff.
+        if previous is None:
+            print(f"latency baseline recorded: no prior value, p95={p95:.1f} ms")
+        else:
+            print(f"latency baseline updated: p95 {previous:.1f} ms -> {p95:.1f} ms")
 
 
 def test_the_stamped_latency_is_not_systematically_smaller_than_the_round_trip(client):

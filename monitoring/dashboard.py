@@ -251,8 +251,10 @@ def accuracy_floor_notice(report: AccuracyReport) -> str:
     return (
         f"{int(report.n)} reviewed item(s), fewer than the {MIN_REVIEWED_FOR_ESTIMATE} this "
         f"panel requires before it prints a headline accuracy. The per-stratum detail and "
-        f"the confidence interval are below; the point estimate is withheld because at this "
-        f"size it is one reviewer's opinion rendered as a percentage."
+        f"the confidence interval are below; the point estimate is demoted out of the "
+        f"headline metric, not withheld -- it still prints one line down, inside its "
+        f"interval, because at this size on its own it is one reviewer's opinion rendered "
+        f"as a percentage."
     )
 
 
@@ -336,7 +338,18 @@ def drift_caption(
                 f"this panel requires, so no drift finding is claimed. The bars below are "
                 f"the full window."
             )
-    stated = "." if n is None else f", over {int(n)} predictions in the drift window."
+        # Enough live traffic to clear the floor, but the window is still mostly replayed
+        # rows: 48 live against 2000 seeded is the live 2026-08-11 shape, and a caption
+        # naming only "2048 predictions" would let that pass as an ordinary measurement. Both
+        # denominators are named whenever any seeding survives in the window, alerting or
+        # not, so a reader always sees how much of "the window" is the baseline's own sample.
+        stated = (
+            f", over {int(n)} predictions in the drift window -- of which {int(live_n)} are "
+            f"live traffic and {int(n) - int(live_n)} are replayed rows the baseline was "
+            f"computed over, so the comparison is dominated by its own reference sample."
+        )
+    else:
+        stated = "." if n is None else f", over {int(n)} predictions in the drift window."
     if not named:
         return f"No label exceeds the PSI alert threshold of {threshold:g}{stated}"
     return (

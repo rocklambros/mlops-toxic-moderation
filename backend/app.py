@@ -232,10 +232,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # than picking a winner and hoping the server picked the same one.
         if "transfer-encoding" in request.headers and "content-length" in request.headers:
             return _reject("oversize", 400, "conflicting Content-Length and Transfer-Encoding")
-        # Ahead of the key check on purpose: a 401 here would tell an internet caller that
-        # the reviewer routes exist and are merely locked. Counted under "unauthenticated"
-        # rather than adding a key, because /health publishes `rejected` and the dashboard
-        # reads its shape.
+        # Ahead of the key check on purpose. This does not hide that the routes exist --
+        # /openapi.json lists all four with include_in_schema=True, unauthenticated, so that
+        # claim would not survive a look at the schema. What the 404 buys is refusing the
+        # capability outright rather than answering a locked door: a public peer gets no
+        # response that distinguishes a present-but-wrong secret from a stopped-cold request,
+        # which is what removes the online brute-force surface against the shared secret.
+        # Counted under "unauthenticated" rather than adding a key, because /health publishes
+        # `rejected` and the dashboard reads its shape.
         if path.startswith(REVIEWER_PATH_PREFIX) and peer_is_public(
             request.client.host if request.client else None
         ):

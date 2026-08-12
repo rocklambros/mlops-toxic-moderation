@@ -6,11 +6,11 @@ numbers instead of replacing them.
 
 | Measure | p50 | p95 | p99 |
 |---|---|---|---|
-| stamped `latency_ms` | 16.0 ms | 20.0 ms | 23.0 ms |
-| client round trip | - | 29.6 ms | - |
+| stamped `latency_ms` | 18.0 ms | 21.0 ms | 22.0 ms |
+| client round trip | - | 29.5 ms | - |
 
 Budget: p95 under 500 ms. Result: PASS.
-Regression gate: a later run fails above 30.0 ms.
+Regression gate: a later run fails above 31.5 ms.
 
 ## What these numbers are, and are not
 
