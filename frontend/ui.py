@@ -50,6 +50,55 @@ def probability_table(result: dict) -> list[dict]:
     ]
 
 
+def probability_chart(rows: list[dict]):
+    """The six probabilities as bars, ordered by probability, coloured by whether the label
+    cleared its threshold.
+
+    Altair is imported here rather than at module scope for the same reason Streamlit is:
+    this module has to stay importable in the job that has no UI dependencies installed.
+
+    Sorted by probability rather than held in LABELS order, because the question a reader
+    brings to this chart is "what drove the decision" and the answer is whichever bars are
+    longest. The per-label order is still available in the table below, which is where a
+    reader who wants to compare the same label across two comments will look.
+
+    Colour encodes `flagged` rather than probability. The decision rule is a per-label
+    threshold, not one cut across all six -- `threat` flags at a far lower probability than
+    `toxic` -- so a gradient would draw a boundary the system does not use, and a reader
+    would infer a single cutoff that is not there.
+    """
+    import altair as alt
+    import pandas as pd
+
+    frame = pd.DataFrame(rows)
+    frame["status"] = frame["flagged"].map({True: "flagged", False: "under threshold"})
+    return (
+        alt.Chart(frame)
+        .mark_bar(cornerRadiusEnd=3)
+        .encode(
+            x=alt.X(
+                "probability:Q",
+                title="calibrated probability",
+                scale=alt.Scale(domain=[0, 1]),
+            ),
+            y=alt.Y("label:N", title=None, sort="-x"),
+            color=alt.Color(
+                "status:N",
+                title=None,
+                scale=alt.Scale(
+                    domain=["flagged", "under threshold"], range=["#d62728", "#9ecae1"]
+                ),
+            ),
+            tooltip=[
+                alt.Tooltip("label:N", title="label"),
+                alt.Tooltip("probability:Q", title="probability", format=".3f"),
+                alt.Tooltip("status:N", title="status"),
+            ],
+        )
+        .properties(height=alt.Step(26))
+    )
+
+
 def feedback_message(verdict: str) -> str:
     """Closed vocabulary in, fixed sentence out: nothing a caller supplies is interpolated
     into a markdown-capable widget."""
@@ -135,9 +184,14 @@ def main() -> None:
     st.progress(min(max(float(result["max_prob"]), 0.0), 1.0))
     st.caption(max_probability_caption(result["max_prob"]))
 
-    st.dataframe(
-        pd.DataFrame(probability_table(result)), hide_index=True, width="stretch"
+    rows = probability_table(result)
+    st.altair_chart(probability_chart(rows), width="stretch")
+    st.caption(
+        "Each label carries its own threshold, so a shorter bar can be flagged while a "
+        "longer one is not. The decision above is the strongest label's band."
     )
+    with st.expander("Exact probabilities"):
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
     st.subheader("Was this decision right?")
     st.caption(

@@ -113,6 +113,60 @@ def _login_form() -> None:
             st.error(SIGN_IN_FAILED)
 
 
+def comparison_chart(rows: list[dict]):
+    """Production model against the DistilBERT challenger, one grouped pair per label.
+
+    Altair is imported here rather than at module scope for the same reason Streamlit is:
+    the decision logic in this module has to stay importable without a UI stack installed.
+
+    Held in LABELS order rather than sorted by probability, which is the opposite of the
+    choice `frontend/ui.py` makes for its chart, and deliberately. A reviewer works down a
+    queue and compares the same label across many items; a re-sorting axis would move
+    `threat` to a different row on every comment and make that comparison impossible. The
+    user-facing chart has no such continuity to preserve, so there it sorts by magnitude.
+
+    A label the challenger did not score is dropped from the challenger series rather than
+    plotted as zero. Zero is a claim -- "the challenger saw this and said no" -- and absence
+    is not that claim.
+    """
+    import altair as alt
+    import pandas as pd
+
+    records = []
+    for row in rows:
+        records.append(
+            {"label": row["label"], "series": "production", "probability": row["production model"]}
+        )
+        if row["challenger (DistilBERT)"] is not None:
+            records.append(
+                {
+                    "label": row["label"],
+                    "series": "challenger",
+                    "probability": row["challenger (DistilBERT)"],
+                }
+            )
+    return (
+        alt.Chart(pd.DataFrame(records))
+        .mark_bar(cornerRadiusEnd=3)
+        .encode(
+            y=alt.Y("label:N", title=None, sort=list(LABELS)),
+            x=alt.X(
+                "probability:Q",
+                title="calibrated probability",
+                scale=alt.Scale(domain=[0, 1]),
+            ),
+            yOffset="series:N",
+            color=alt.Color("series:N", title=None),
+            tooltip=[
+                alt.Tooltip("label:N"),
+                alt.Tooltip("series:N"),
+                alt.Tooltip("probability:Q", format=".3f"),
+            ],
+        )
+        .properties(height=alt.Step(14))
+    )
+
+
 def main() -> None:
     import pandas as pd
     import streamlit as st
@@ -140,6 +194,18 @@ def main() -> None:
             render_comment(exc.detail)
         return
 
+    # Rendered from session state on the run AFTER the submit, not inline with it. Until
+    # 2026-08-12 the submit branch called `st.success(...)` and then `st.rerun()`, and
+    # `st.rerun()` abandons the current script run -- so the message was discarded before the
+    # browser ever painted it. A reviewer saw the page silently advance to the next item and
+    # had no way to tell a recorded review from a dropped one. The error branch has no rerun,
+    # so failures showed and successes did not, which is the worst way round.
+    #
+    # `frontend/ui.py` already does it this way for user feedback; this is that pattern, and
+    # it pops rather than persisting because the confirmation belongs to one submit.
+    if st.session_state.pop("review_recorded", None):
+        st.success(REVIEW_RECORDED)
+
     if not items:
         st.info(QUEUE_EMPTY)
         return
@@ -151,20 +217,21 @@ def main() -> None:
     render_comment(item["input_text_snapshot"])
 
     challenger = challenger_column(item.get("distilbert_probs"))
-    st.dataframe(
-        pd.DataFrame(
-            [
-                {
-                    "label": label,
-                    "production model": item["model_probs"][label],
-                    "challenger (DistilBERT)": challenger[label],
-                }
-                for label in LABELS
-            ]
-        ),
-        hide_index=True,
-        width="stretch",
+    rows = [
+        {
+            "label": label,
+            "production model": item["model_probs"][label],
+            "challenger (DistilBERT)": challenger[label],
+        }
+        for label in LABELS
+    ]
+    st.altair_chart(comparison_chart(rows), width="stretch")
+    st.caption(
+        "Where the two models disagree is where your judgement is worth the most. Held in "
+        "label order, not sorted, so the same label sits in the same place on every item."
     )
+    with st.expander("Exact probabilities"):
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
     if all(value is None for value in challenger.values()):
         st.caption(NO_CHALLENGER)
 
@@ -179,7 +246,9 @@ def main() -> None:
             client.submit(token, item["request_id"], build_label_payload(checked))
             for label in LABELS:
                 st.session_state.pop(f"cb_{label}", None)
-            st.success(REVIEW_RECORDED)
+            # The flag, not the message. `st.rerun()` below discards everything this run
+            # drew; only session state survives it.
+            st.session_state["review_recorded"] = item["request_id"]
             st.rerun()
         except BackendError as exc:
             st.error(REVIEW_FAILED)

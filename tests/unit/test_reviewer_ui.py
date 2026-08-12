@@ -176,3 +176,80 @@ def test_the_reviewer_never_names_a_reviewer_id_field():
     """Delivery spec 6.3: the identity is derived server-side, so the console has no way to
     assert one even by accident."""
     assert _code_names(SOURCE, "reviewer_id") == []
+
+
+# ------------------------------------------------- the confirmation, and the chart
+#
+# Source-level for the same reason as tests/unit/test_user_ui.py: neither streamlit nor
+# altair is installed in the dev environment, and that absence is what proves this module
+# imports without a UI stack. These pin the specification; the deployed page proves rendering.
+
+REVIEWER_SOURCE = Path("frontend/reviewer.py").read_text(encoding="utf-8")
+
+
+def test_the_success_message_is_not_drawn_in_the_run_that_reruns():
+    """The bug this replaces: `st.success(REVIEW_RECORDED)` immediately followed by
+    `st.rerun()`. `st.rerun()` abandons the current script run, so the message was discarded
+    before the browser painted it -- a reviewer saw the page advance to the next item with no
+    way to tell a recorded review from a dropped one. Worse, the error branch has no rerun,
+    so failures were visible and successes were not.
+    """
+    submit = REVIEWER_SOURCE[REVIEWER_SOURCE.index('st.button("Submit review"') :]
+    submit = submit[: submit.index("except BackendError")]
+    assert "st.rerun()" in submit, "the submit branch no longer reruns; this test is stale"
+    assert "st.success" not in submit, (
+        "st.success is being drawn in the run that calls st.rerun(); the rerun discards it"
+    )
+    assert 'st.session_state["review_recorded"]' in submit, (
+        "nothing survives the rerun to carry the confirmation to the next run"
+    )
+
+
+def test_the_confirmation_is_rendered_from_state_and_shown_once():
+    """Popped rather than read: a confirmation that persists would reappear on every later
+    rerun and claim a review that did not happen."""
+    assert 'st.session_state.pop("review_recorded", None)' in REVIEWER_SOURCE
+    render_at = REVIEWER_SOURCE.index('pop("review_recorded"')
+    set_at = REVIEWER_SOURCE.index('st.session_state["review_recorded"]')
+    assert render_at < set_at, (
+        "the confirmation is popped after it is set, so it is consumed in the same run"
+    )
+
+
+def test_the_confirmation_survives_an_emptied_queue():
+    """Reviewing the last item empties the queue, and the early `return` for an empty queue
+    must not swallow the confirmation for the review that emptied it."""
+    render_at = REVIEWER_SOURCE.index('pop("review_recorded"')
+    empty_at = REVIEWER_SOURCE.index("st.info(QUEUE_EMPTY)")
+    assert render_at < empty_at, (
+        "the empty-queue branch returns before the confirmation is drawn, so the review that "
+        "emptied the queue reports nothing"
+    )
+
+
+def test_the_comparison_chart_holds_label_order():
+    """A reviewer works down a queue comparing the same label across items. Sorting by
+    magnitude, which is right for the user-facing chart, would move `threat` to a different
+    row on every comment."""
+    chart = REVIEWER_SOURCE[
+        REVIEWER_SOURCE.index("def comparison_chart") : REVIEWER_SOURCE.index("def main")
+    ]
+    assert "sort=list(LABELS)" in chart, "the reviewer chart re-sorts between items"
+    assert 'sort="-x"' not in chart
+
+
+def test_an_unscored_challenger_label_is_omitted_rather_than_plotted_as_zero():
+    """Zero is a claim -- the challenger saw this and said no. Absence is not that claim, and
+    a zero bar would read as a confident disagreement with the production model."""
+    chart = REVIEWER_SOURCE[
+        REVIEWER_SOURCE.index("def comparison_chart") : REVIEWER_SOURCE.index("def main")
+    ]
+    assert 'is not None' in chart, "unscored challenger labels are not filtered"
+
+
+def test_the_chart_never_sees_the_comment_text():
+    """The comment has exactly one sink. A chart embeds its data in the page as JSON."""
+    chart = REVIEWER_SOURCE[
+        REVIEWER_SOURCE.index("def comparison_chart") : REVIEWER_SOURCE.index("def main")
+    ]
+    assert "input_text_snapshot" not in chart

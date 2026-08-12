@@ -8,11 +8,31 @@
 # switch makes "which one is exposed" a deploy-time argument instead of a build-time fact.
 FROM python:3.11-slim-bookworm@sha256:b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba AS runtime
 
+# ARROW_DEFAULT_MEMORY_POOL=system is a crash fix, not a tuning knob. pyarrow 25 on
+# aarch64 defaults to its bundled mimalloc, and Streamlit runs every script run on a fresh
+# ScriptRunner thread -- so every page load enters mimalloc's per-thread heap setup from a
+# brand-new thread. On 2026-08-12 that segfaulted the monitoring dashboard, five times, with
+# the core naming mi_thread_init under arrow::py::NdarrayToArrow under Table.from_pandas,
+# which is what st.dataframe calls. The system allocator has no such path. At this project's
+# data sizes the allocator choice is not measurable; tests/unit/test_arrow_allocator.py holds
+# every Streamlit image to it.
+#
+# Shipped WITHOUT a reproduction, which is why PYTHONFAULTHANDLER rides along. Two attempts
+# to reproduce -- 60 concurrent threads x 40 conversions, and 1500 sequential thread
+# create/destroy cycles -- both survived on mimalloc, so 'the system pool fixes it' is
+# inference from the backtrace rather than measurement. Frame 0 is where the process died,
+# and an allocator is the usual victim of heap corruption caused somewhere else; if that is
+# what this is, changing pools moves the symptom instead of removing it. faulthandler makes
+# the next occurrence say so: it prints the Python frame to stderr on SIGSEGV, and the
+# awslogs driver ships stderr to CloudWatch, so a recurrence arrives as a stack trace
+# rather than as another stripped core nobody can read.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PYTHONPATH=/app
+    PYTHONPATH=/app \
+    ARROW_DEFAULT_MEMORY_POOL=system \
+    PYTHONFAULTHANDLER=1
 
 RUN useradd --create-home --uid 10001 appuser
 
