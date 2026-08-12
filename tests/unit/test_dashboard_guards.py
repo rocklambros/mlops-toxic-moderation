@@ -24,9 +24,11 @@ import pytest
 from model.labels import LABELS
 from monitoring.dashboard import (
     MIN_BUCKETS,
+    MIN_REVIEWED_FOR_ESTIMATE,
     REFERENCE_UNAVAILABLE,
     Snapshot,
     accuracy_caption,
+    accuracy_floor_notice,
     accuracy_metric,
     alerting_labels,
     drift_caption,
@@ -54,6 +56,7 @@ XSS = "<img src=x onerror=alert(1)>"
 VETTED_FORMATTERS = frozenset(
     {
         "accuracy_caption",
+        "accuracy_floor_notice",
         "accuracy_metric",
         "drift_caption",
         "latency_caption",
@@ -170,6 +173,14 @@ def test_accuracy_metric_refuses_anything_that_is_not_a_number():
     assert accuracy_metric(0.8333) == "83.3%"
     with pytest.raises(ValueError):
         accuracy_metric(XSS)
+
+
+def test_accuracy_floor_notice_refuses_anything_that_is_not_a_number():
+    """Mirror of the guard above: `int(report.n)` fails closed on adversarial input, which
+    is what lets this formatter sit in VETTED_FORMATTERS beside accuracy_metric."""
+    bad = AccuracyReport(n=XSS, point=1.0, lo=0.2, hi=1.0, effective_n=1.0, strata=[])
+    with pytest.raises(ValueError):
+        accuracy_floor_notice(bad)
 
 
 def test_latency_caption_requires_seven_buckets_before_claiming_a_trend():
@@ -298,10 +309,15 @@ def _bucket(day: int) -> LatencyBucket:
     )
 
 
-def _drift(rate: float = 0.0, alert: bool = False) -> list[DriftRow]:
+def _drift(
+    rate: float = 0.0,
+    alert: bool = False,
+    n: int | None = None,
+    live_n: int | None = None,
+) -> list[DriftRow]:
     return [
         DriftRow(label=label, baseline_rate=0.1, production_rate=rate, psi=0.0, js=0.0,
-                 alert=alert)
+                 alert=alert, n=n, live_n=live_n)
         for label in LABELS
     ]
 
@@ -367,6 +383,51 @@ def test_an_all_one_class_accuracy_renders_a_bounded_interval(drawn):
     assert "100.0% (95% CI 92.8%-100.0%)" in _captions(drawn)
 
 
+def test_below_the_accuracy_floor_renders_the_notice_and_withholds_the_metric(drawn):
+    """A point estimate exists but n is below MIN_REVIEWED_FOR_ESTIMATE: the notice must
+    render and the headline metric must not."""
+    render(
+        _snapshot(
+            accuracy=AccuracyReport(
+                n=MIN_REVIEWED_FOR_ESTIMATE - 1, point=1.0, lo=0.6, hi=1.0,
+                effective_n=float(MIN_REVIEWED_FOR_ESTIMATE - 1),
+                strata=[
+                    StratumStat(
+                        "flagged", MIN_REVIEWED_FOR_ESTIMATE - 1, MIN_REVIEWED_FOR_ESTIMATE - 1,
+                        1.0, 1.0, 0.6, 1.0,
+                    )
+                ],
+            )
+        )
+    )
+    assert _calls(drawn, "metric") == []
+    assert len(_calls(drawn, "info")) == 1
+    assert str(MIN_REVIEWED_FOR_ESTIMATE - 1) in str(_calls(drawn, "info")[0][1][0])
+
+
+def test_at_the_accuracy_floor_renders_the_metric_and_withholds_the_notice(drawn):
+    """n at MIN_REVIEWED_FOR_ESTIMATE: the headline metric must render and the notice must
+    not. This is the case that catches two independent `if` statements standing in for
+    `if`/`elif` in `render`: with two ifs, `point is not None` holds for any n >= 1, so both
+    the metric and the notice would draw here."""
+    render(
+        _snapshot(
+            accuracy=AccuracyReport(
+                n=MIN_REVIEWED_FOR_ESTIMATE, point=1.0, lo=0.9, hi=1.0,
+                effective_n=float(MIN_REVIEWED_FOR_ESTIMATE),
+                strata=[
+                    StratumStat(
+                        "flagged", MIN_REVIEWED_FOR_ESTIMATE, MIN_REVIEWED_FOR_ESTIMATE,
+                        1.0, 1.0, 0.9, 1.0,
+                    )
+                ],
+            )
+        )
+    )
+    assert _calls(drawn, "metric")[0][1][1] == "100.0%"
+    assert _calls(drawn, "info") == []
+
+
 def test_a_stratum_with_no_samples_is_simply_absent_and_the_page_says_so(drawn):
     """The random-audit stratum is empty because RANDOM_AUDIT_RATE was left at zero. The
     estimate is then blind to confidently-allowed false negatives, and must say so rather
@@ -423,3 +484,18 @@ def test_alerting_labels_is_empty_when_there_is_no_drift_panel():
     assert alerting_labels(_snapshot()) == []
     assert alerting_labels(_snapshot(drift=_drift(alert=False))) == []
     assert alerting_labels(_snapshot(drift=_drift(alert=True))) == list(LABELS)
+
+
+def test_render_wires_the_live_sample_size_into_the_drift_caption(drawn):
+    """`render` has to pass `live_n=` through to `drift_caption`, not just `n=`. A snapshot
+    whose rows carry `n=2048, live_n=5` -- 2043 replayed rows, 5 live -- can only produce the
+    seed-dominated "wiring check" wording if that keyword argument survives the call in
+    `render`. Deleting it silently falls back to `drift_caption`'s `live_n=None` default,
+    which reports this exact seed-dominated window as an ordinary 2048-prediction
+    measurement with no caveat at all -- the regression `test_drift_seeded_separation.py`
+    cannot catch, because it calls `drift_caption` directly and never exercises `render`."""
+    render(_snapshot(drift=_drift(n=2048, live_n=5)))
+    caption = _captions(drawn)
+    assert "wiring check" in caption
+    assert "2048" in caption
+    assert "Only 5 are live traffic" in caption

@@ -167,8 +167,14 @@ rescorer-lock: check-py
 	rm -rf .venv-lock
 
 # -s so the measured percentiles reach the operator's terminal, not just the report file.
+#
+# UPDATE_LATENCY_BASELINE is set HERE and nowhere else, which is what makes
+# docs/latency-baseline.md's claim to have been "Measured by `make loadtest`" true. It was
+# not true before 2026-08-11: the perf test is also marked `integration`, so every
+# `make test-integration`, `make test-cov` and CI `test` job silently rewrote the committed
+# document. Those runs now compare against it and fail on a regression instead.
 loadtest:
-	PYTHONHASHSEED=0 $(BIN)/pytest -m perf -s
+	PYTHONHASHSEED=0 UPDATE_LATENCY_BASELINE=1 $(BIN)/pytest -m perf -s
 
 serve:
 	$(BIN)/uvicorn backend.app:create_app --factory --host 127.0.0.1 --port 8000

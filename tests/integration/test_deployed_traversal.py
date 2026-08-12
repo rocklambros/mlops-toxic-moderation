@@ -164,6 +164,24 @@ def test_the_dashboards_credentials_cannot_write(endpoints):
     assert "permission denied" in error.lower(), f"refused, but not by permissions: {error}"
 
 
+def test_the_reviewer_routes_do_not_answer_the_internet(endpoints):
+    """They are mounted on the same app as /predict, which the demo window opens to
+    0.0.0.0/0. Before 2026-08-11 they answered 401 from their own handlers -- which is a
+    route confirming it exists to anyone who asks."""
+    for path in ("/review/login", "/review/pending", "/review/submit"):
+        response = httpx.post(f"{endpoints['backend_url']}{path}", json={}, timeout=15)
+        assert response.status_code == 404, f"{path} answered {response.status_code}"
+
+
+def test_the_guard_discriminates_by_path_rather_than_hiding_every_route(endpoints):
+    """A blanket 404 would also hide the graded anonymous feedback route. /feedback/user must
+    still answer 401 -- present, and requiring the demo key."""
+    response = httpx.post(
+        f"{endpoints['backend_url']}/feedback/user", json={}, timeout=15
+    )
+    assert response.status_code == 401
+
+
 def test_the_traversal_evidence_accounts_for_every_first_time_integration():
     """H26. Each integration named, with where it was first exercised.
 

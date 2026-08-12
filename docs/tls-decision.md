@@ -64,9 +64,14 @@ graded feedback metric, answered 200.
 
 Two things follow, and neither is walked back anywhere else in this document:
 
-- **A credential does cross a cleartext listener.** The reviewer shared secret is POSTed to
-  `/review/login` on 8000. A network observer on the path reads it, and with it can read the
-  moderation queue and write the graded feedback metric.
+- **A credential crosses a cleartext listener, inside the VPC.** The reviewer shared secret is
+  POSTed to `/review/login`, and until 2026-08-11 that route answered the internet. It no
+  longer does: `backend/app.py` refuses any `/review/*` request from a globally routable peer
+  with a 404. What remains is a private hop in cleartext -- the console posts to the backend's
+  private address -- so an observer inside the VPC reads it and an observer outside cannot
+  reach the route at all. No path this project operates ever sent the secret across the public
+  listener; the exposure was that the route *accepted* it, which made it brute-forceable
+  online, and `backend/review_api.py:162` metered that at five attempts a minute per peer.
 - **The reviewer capability is restricted, not structurally out of reach.** What is
   structurally out of reach is the Streamlit console that renders it.
 
@@ -78,10 +83,11 @@ exposure and it is not TLS: it does not stop an observer reading the secret in f
 
 ## What is exposed, and on what
 
-| Listener | Port | Ingress as of 2026-08-10 | Carries |
+| Listener | Port | Ingress as of 2026-08-11 | Carries |
 |---|---|---|---|
 | FastAPI `/predict`, `/health` | 8000 | **`0.0.0.0/0`** plus the operator address | Comment text submitted by anyone holding the demo API key |
-| **FastAPI reviewer and feedback routes** | **8000, the same listener** | **`0.0.0.0/0`** plus the operator address | **The reviewer shared secret on `/review/login`, a bearer session token, and raw comment text from `/review/pending`** |
+| **FastAPI reviewer routes** | **8000, the same listener** | **VPC peers only** -- a globally routable peer gets 404 (`backend/app.py`) | **The reviewer shared secret on `/review/login`, a bearer session token, and raw comment text from `/review/pending`** |
+| FastAPI `/feedback/user` | 8000, the same listener | **`0.0.0.0/0`** plus the operator address | An anonymous agree/disagree verdict, behind the demo key. Graded under rubric 3.2 |
 | Streamlit user UI | 8501 | **`0.0.0.0/0`** plus the operator address | The same text and the returned probabilities |
 | Monitoring dashboard | 8502 | **`0.0.0.0/0`** plus the operator address | Aggregated counts, latencies and rates. No raw comment text |
 | **Reviewer console (Streamlit)** | **8503** | **none, on any security group** | **The same secret and comment text, over an SSM tunnel** |
@@ -106,6 +112,17 @@ aws ssm start-session --target "$INSTANCE_ID" \
 That tunnel carries the console. It does not carry the console's API calls, which go from the
 frontend instance to the backend instance on 8000, and it does not change where a reviewer
 signing in from that console sends the shared secret.
+
+This narrows the exposure; it does not remove the credential, and the reason is worth
+recording. The two containers share the **instance**, and therefore its private IP.
+`peer_is_public` discriminates on the peer address, and a security group is attached per
+network interface rather than per container -- so no group boundary and no IP test can
+separate two processes on one host. The public UI container reaches these routes from the
+same private address the reviewer console does, and the shared secret is what stands between
+them. A 2026-08-11 design that would have removed it -- by relocating the console and serving the
+routes on an unpublished port -- was refuted: it moved an adversarial-input renderer onto the
+tier that holds the RDS master credential, reversing premortem H16. See
+`docs/superpowers/specs/2026-08-11-reviewer-loopback-no-secret-design.md` section 0.
 
 ## Alternatives considered and why each was rejected
 
@@ -213,7 +230,17 @@ load-bearing in a way they were not when the window was hours long.
   catch a condition that was already true when it was written;
 - real user traffic reaches `/predict` from anyone other than the operator or a grader;
 - port 8503 acquires an ingress rule on any security group, in which case even the console is
-  reachable in the clear.
+  reachable in the clear;
+- a reverse proxy (Caddy, per the alternative above, or anything else) is introduced in front
+  of the backend listener on 8000. `backend.app.peer_is_public` decides the reviewer-route
+  guard from `request.client.host`, and that is the true peer only because nothing sits in
+  front of this listener today. A proxy in front of it replaces that value with the proxy's
+  own address — typically loopback — so the guard's `is_global` check is False for every
+  caller, public included, and the control silently inverts to fully permissive: no
+  exception, no failing test, just an internet-reachable reviewer queue again. The guard has
+  to move to a proxy-aware source of the peer address (a proxy protocol line, or a header the
+  proxy sets and strips on the client-facing side) before that listener gets a proxy in front
+  of it, not after.
 
 The first of those is now a live possibility rather than a hypothetical, because the window
 has no close date. If it fires, Caddy with Let's Encrypt is the answer, not an ALB — the

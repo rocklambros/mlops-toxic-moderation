@@ -91,6 +91,15 @@ MIN_SAMPLES_PER_BUCKET = 20
 # that is where the alert flag is computed. See the module docstring for why the two panels
 # treat a thin window differently.
 
+# The floor Panel 3 did not have. Matched to MIN_DRIFT_SAMPLES rather than chosen freshly:
+# both answer the same question -- how many observations before a proportion is reported as
+# a finding -- and two different numbers for one question invite the smaller to be quoted.
+#
+# Counted on reviewed rows, not on the Kish effective size. `effective_n` falls below the raw
+# count when the design weights are uneven, which would make the floor bite hardest exactly
+# when the random-audit stratum is doing its job.
+MIN_REVIEWED_FOR_ESTIMATE = 30
+
 # The dashboard shows ALL history by default, and bounds only the drift comparison.
 #
 # It used to bound everything with one 14-day `since` threaded into all seven queries. Only
@@ -233,6 +242,22 @@ def accuracy_metric(point: float) -> str:
     return f"{float(point):.1%}"
 
 
+def accuracy_is_reportable(report: AccuracyReport) -> bool:
+    """Whether the headline metric may be drawn, as opposed to the caption and the strata."""
+    return report.point is not None and int(report.n) >= MIN_REVIEWED_FOR_ESTIMATE
+
+
+def accuracy_floor_notice(report: AccuracyReport) -> str:
+    return (
+        f"{int(report.n)} reviewed item(s), fewer than the {MIN_REVIEWED_FOR_ESTIMATE} this "
+        f"panel requires before it prints a headline accuracy. The per-stratum detail and "
+        f"the confidence interval are below; the point estimate is demoted out of the "
+        f"headline metric, not withheld -- it still prints one line down, inside its "
+        f"interval, because at this size on its own it is one reviewer's opinion rendered "
+        f"as a percentage."
+    )
+
+
 def latency_caption(n_buckets: int, sample_counts: list[int] | None = None) -> str:
     """Say how many requests each point stands for, not just how many points there are.
 
@@ -266,7 +291,10 @@ def latency_caption(n_buckets: int, sample_counts: list[int] | None = None) -> s
 
 
 def drift_caption(
-    alerting: list[str], alert_psi: float | None = None, n: int | None = None
+    alerting: list[str],
+    alert_psi: float | None = None,
+    n: int | None = None,
+    live_n: int | None = None,
 ) -> str:
     """Say what the comparison rests on, not only what it concluded.
 
@@ -295,7 +323,33 @@ def drift_caption(
             f"comment moves a flag rate by {1.0 / int(n):.0%} at this size, so the bars "
             "below are recent traffic and no PSI alert is claimed from them."
         )
-    stated = "." if n is None else f", over {int(n)} predictions in the drift window."
+    # A window dominated by replayed rows cannot carry a drift finding in either direction.
+    # `make seed-demo` replays the locked held-out split, and baseline_flag_rates.json was
+    # computed over that same split, so PSI across those rows compares a distribution with
+    # itself. Reporting "no label exceeds the threshold" over them states a conclusion the
+    # comparison is structurally incapable of reaching.
+    if live_n is not None and n is not None and live_n < int(n):
+        if int(live_n) < MIN_DRIFT_SAMPLES:
+            return (
+                f"{int(n)} predictions in the drift window, but {int(n) - int(live_n)} of "
+                f"them are replayed held-out rows that the baseline was itself computed "
+                f"over -- comparing those against it is a wiring check, not a measurement. "
+                f"Only {int(live_n)} are live traffic, fewer than the {MIN_DRIFT_SAMPLES} "
+                f"this panel requires, so no drift finding is claimed. The bars below are "
+                f"the full window."
+            )
+        # Enough live traffic to clear the floor, but the window is still mostly replayed
+        # rows: 48 live against 2000 seeded is the live 2026-08-11 shape, and a caption
+        # naming only "2048 predictions" would let that pass as an ordinary measurement. Both
+        # denominators are named whenever any seeding survives in the window, alerting or
+        # not, so a reader always sees how much of "the window" is the baseline's own sample.
+        stated = (
+            f", over {int(n)} predictions in the drift window -- of which {int(live_n)} are "
+            f"live traffic and {int(n) - int(live_n)} are replayed rows the baseline was "
+            f"computed over, so the comparison is dominated by its own reference sample."
+        )
+    else:
+        stated = "." if n is None else f", over {int(n)} predictions in the drift window."
     if not named:
         return f"No label exceeds the PSI alert threshold of {threshold:g}{stated}"
     return (
@@ -447,11 +501,19 @@ def render(data: Snapshot) -> None:
     st.header("2. Predicted class distribution (target drift)")
     if data.drift:
         _render_drift(data)
-    st.caption(drift_caption(alerting_labels(data), n=drift_sample_size(data)))
+    st.caption(
+        drift_caption(
+            alerting_labels(data),
+            n=drift_sample_size(data),
+            live_n=drift_live_sample_size(data),
+        )
+    )
 
     st.header("3. Live accuracy from human feedback")
-    if data.accuracy.point is not None:
+    if accuracy_is_reportable(data.accuracy):
         st.metric("Live accuracy (design-weighted)", accuracy_metric(data.accuracy.point))
+    elif data.accuracy.point is not None:
+        st.info(accuracy_floor_notice(data.accuracy))
     st.caption(accuracy_caption(data.accuracy))
     if data.accuracy.strata:
         st.dataframe(
@@ -493,6 +555,11 @@ def drift_sample_size(data: Snapshot) -> int | None:
     """
     rows = data.drift or []
     return rows[0].n if rows else None
+
+
+def drift_live_sample_size(data: "Snapshot") -> int | None:
+    """The live half of the drift denominator, or None if the rows did not record one."""
+    return next((row.live_n for row in (data.drift or [])), None)
 
 
 def _render_drift(data: Snapshot) -> None:

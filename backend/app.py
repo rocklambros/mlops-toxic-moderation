@@ -26,6 +26,7 @@ derived before the limit check rather than after it.
 """
 
 import datetime as dt
+import ipaddress
 import json
 import logging
 import random
@@ -117,6 +118,44 @@ AUTHENTICATED_READ_PATHS = frozenset({"/review/pending"})
 # per-visitor limit it is a multiple of.
 PEER_CEILING_MULTIPLIER = 10
 
+# Every route the reviewer capability is reached through. `/review/login` is included
+# deliberately: it is the one route the demo key cannot cover, so it is the one most worth
+# taking off the internet.
+REVIEWER_PATH_PREFIX = "/review/"
+
+
+def peer_is_public(host: str | None) -> bool:
+    """Whether the TCP peer is a globally routable address.
+
+    `is_global` is the whole test and needs no configuration: it is false for 10/8,
+    172.16/12, 192.168/16 and loopback -- every legitimate caller, since roll.sh points the
+    console at the backend's PRIVATE address -- and true for any real internet address.
+
+    A peer that does not parse is treated as not public. There is no reverse proxy in front
+    of this listener (docs/tls-decision.md), so `request.client.host` is the true peer and the
+    only non-address value it takes is an in-process test client. X-Forwarded-For is never
+    consulted, here or in `caller_identity`: a header a caller sets cannot be a trust input.
+
+    PRECONDITION, not an aside: this function is correct only as long as that stays true.
+    `docs/tls-decision.md` names Caddy as the accepted next move if the demo window outlives
+    the assignment, and Caddy is a reverse proxy. Put one in front of this listener and
+    `request.client.host` stops being the caller's address -- it becomes the proxy's, typically
+    loopback -- so `ipaddress.ip_address(host).is_global` is False for every caller, public
+    included, and the guard this function backs inverts to fully permissive with no exception
+    raised and no test failing locally. Do not patch this speculatively by trusting
+    X-Forwarded-For: a header a caller sets is not a trust input, which is the same reason it
+    is not consulted today. When a proxy is actually introduced, the peer source this function
+    reads has to move with it (a proxy protocol line, or a header the proxy itself sets and
+    strips from the client-facing side) -- see the tripwire in `docs/tls-decision.md`'s
+    "Re-open this decision if" list.
+    """
+    if not host:
+        return False
+    try:
+        return ipaddress.ip_address(host).is_global
+    except ValueError:
+        return False
+
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
@@ -193,6 +232,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # than picking a winner and hoping the server picked the same one.
         if "transfer-encoding" in request.headers and "content-length" in request.headers:
             return _reject("oversize", 400, "conflicting Content-Length and Transfer-Encoding")
+        # Ahead of the key check on purpose. This does not hide that the routes exist --
+        # /openapi.json lists all four with include_in_schema=True, unauthenticated, so that
+        # claim would not survive a look at the schema. What the 404 buys is refusing the
+        # capability outright rather than answering a locked door: a public peer gets no
+        # response that distinguishes a present-but-wrong secret from a stopped-cold request,
+        # which is what removes the online brute-force surface against the shared secret.
+        # Counted under "unauthenticated" rather than adding a key, because /health publishes
+        # `rejected` and the dashboard reads its shape.
+        if path.startswith(REVIEWER_PATH_PREFIX) and peer_is_public(
+            request.client.host if request.client else None
+        ):
+            return _reject("unauthenticated", 404, "Not Found")
         if request.method in BODY_METHODS:
             raw_length = request.headers.get("content-length")
             if raw_length is None:
