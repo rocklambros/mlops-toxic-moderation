@@ -95,8 +95,8 @@ deliverables:
         path: docs/evidence/screenshots/monitoring-dashboard-populated.png
         redacted_account_id: true
         contains_raw_user_text: false
-        prediction_count: 2048
-        time_buckets: 14
+        prediction_count: 2056
+        time_buckets: 15
         reviewed_items: 643
         shows: >-
           The monitoring dashboard reading the production database: latency over time as
