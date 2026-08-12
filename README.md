@@ -108,6 +108,68 @@ comment in the browser exercises the full path with nothing to configure. The ke
 needed to call `/predict` directly with `curl`, and it travels with the assignment
 submission rather than being published in this repository.
 
+### Every address, in one place
+
+Each of these was verified returning HTTP 200 **logged out**, from a session holding no
+cookie for GitHub, W&B or AWS. Nothing here asks for a credential.
+
+| | |
+|---|---|
+| Repository | <https://github.com/rocklambros/mlops-toxic-moderation> |
+| Moderation UI | <http://34.210.186.130:8501> |
+| Monitoring dashboard | <http://52.43.232.239:8502> |
+| API documentation | <http://44.239.182.162:8000/docs> |
+| API health | <http://44.239.182.162:8000/health> |
+| Experiment tracking | [W&B report](https://wandb.ai/rockcyber/mlops-toxic-moderation/reports/Toxic-comment-moderation---experiment-tracking--VmlldzoxNzY5OTgyOQ==) |
+| Model registry | [`toxic-clf` v1, `production`](https://wandb.ai/rockcyber/mlops-toxic-moderation/artifacts/model/toxic-clf/v1) |
+| Screenshots | [`docs/evidence/screenshots/`](docs/evidence/screenshots) |
+| CI/CD evidence | [Actions](https://github.com/rocklambros/mlops-toxic-moderation/actions) · [`docs/evidence/ci-gate.md`](docs/evidence/ci-gate.md) |
+
+## Which model is promoted, and why
+
+`toxic-clf` v1 — a TF-IDF and linear classifier pipeline — carries the `production` alias.
+**It is not the highest-scoring model that was trained**, and that is worth stating before a
+reader finds it in the model card.
+
+| model | macro PR-AUC | measured on | promoted |
+|---|---|---|---|
+| prior-only baseline | 0.0380 | five-fold OOF | no |
+| `toxic-clf` | 0.6656 | five-fold OOF | — |
+| **`toxic-clf`** | **0.6632** | **held-out test** | **yes** |
+| DistilBERT fine-tune | 0.7268 | validation | no |
+
+The three bases are listed separately because they are not interchangeable, and reading down
+the column as though they were is the mistake this table exists to prevent. Compare the
+baseline against `toxic-clf` on OOF — 0.0380 against 0.6656, the same five folds. The
+held-out 0.6632 is the number that describes the promoted model to the world. DistilBERT's
+0.7268 is validation, and there is no held-out figure for it at all.
+
+That last absence is deliberate, and it is the first of three reasons the transformer was not
+promoted. Only the third is a hard blocker:
+
+**It was never measured on the held-out set, deliberately.** Choosing between two candidates
+on test numbers is selection on the test set, and it biases whichever wins. That split
+measures the chosen model; it does not choose it. The honest head-to-head was never run,
+because running it would have spent the split on a decision rather than a description.
+
+**It does not fit the serving host.** The promoted pipeline holds a 0.63 GB resident set and
+answers at 25 ms p50 on a 4 GB CPU instance. Float32 DistilBERT does not, at this project's
+cost envelope.
+
+**Its quantized export failed its own equivalence gate.** The int8 conversion was refused at a
+maximum absolute logit delta of 0.5728 against a 0.05 ceiling — the quantizer ran per-tensor
+and targeted x86 rather than the arm64 fleet that actually serves. So there is no *verified*
+deployable DistilBERT artifact. The float checkpoint and both ONNX graphs are kept as
+versioned W&B artifacts with digests, and neither is aliased to any promoted stage.
+
+Promoting the model that passes the serving gate over the model with the better validation
+number is a deliberate trade, and it is **not** what rubric 1.3 literally asks for. It is
+recorded as PARTIAL in [`docs/rubric-conformance.md`](docs/rubric-conformance.md) rather than
+argued into a PASS. The validation gap is real evidence that a transformer would do better on
+the rare labels, and it is the strongest argument in [`MODEL_CARD.md`](MODEL_CARD.md) for a
+future version — but it is not a claim about held-out performance, because no such
+measurement exists.
+
 ## What runs where
 
 | Instance | Class | Component | Port | Reachable at |
