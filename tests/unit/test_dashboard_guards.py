@@ -24,6 +24,7 @@ import pytest
 from model.labels import LABELS
 from monitoring.dashboard import (
     MIN_BUCKETS,
+    MIN_REVIEWED_FOR_ESTIMATE,
     REFERENCE_UNAVAILABLE,
     Snapshot,
     accuracy_caption,
@@ -375,6 +376,51 @@ def test_an_all_one_class_accuracy_renders_a_bounded_interval(drawn):
     )
     assert _calls(drawn, "metric")[0][1][1] == "100.0%"
     assert "100.0% (95% CI 92.8%-100.0%)" in _captions(drawn)
+
+
+def test_below_the_accuracy_floor_renders_the_notice_and_withholds_the_metric(drawn):
+    """A point estimate exists but n is below MIN_REVIEWED_FOR_ESTIMATE: the notice must
+    render and the headline metric must not."""
+    render(
+        _snapshot(
+            accuracy=AccuracyReport(
+                n=MIN_REVIEWED_FOR_ESTIMATE - 1, point=1.0, lo=0.6, hi=1.0,
+                effective_n=float(MIN_REVIEWED_FOR_ESTIMATE - 1),
+                strata=[
+                    StratumStat(
+                        "flagged", MIN_REVIEWED_FOR_ESTIMATE - 1, MIN_REVIEWED_FOR_ESTIMATE - 1,
+                        1.0, 1.0, 0.6, 1.0,
+                    )
+                ],
+            )
+        )
+    )
+    assert _calls(drawn, "metric") == []
+    assert len(_calls(drawn, "info")) == 1
+    assert str(MIN_REVIEWED_FOR_ESTIMATE - 1) in str(_calls(drawn, "info")[0][1][0])
+
+
+def test_at_the_accuracy_floor_renders_the_metric_and_withholds_the_notice(drawn):
+    """n at MIN_REVIEWED_FOR_ESTIMATE: the headline metric must render and the notice must
+    not. This is the case that catches two independent `if` statements standing in for
+    `if`/`elif` in `render`: with two ifs, `point is not None` holds for any n >= 1, so both
+    the metric and the notice would draw here."""
+    render(
+        _snapshot(
+            accuracy=AccuracyReport(
+                n=MIN_REVIEWED_FOR_ESTIMATE, point=1.0, lo=0.9, hi=1.0,
+                effective_n=float(MIN_REVIEWED_FOR_ESTIMATE),
+                strata=[
+                    StratumStat(
+                        "flagged", MIN_REVIEWED_FOR_ESTIMATE, MIN_REVIEWED_FOR_ESTIMATE,
+                        1.0, 1.0, 0.9, 1.0,
+                    )
+                ],
+            )
+        )
+    )
+    assert _calls(drawn, "metric")[0][1][1] == "100.0%"
+    assert _calls(drawn, "info") == []
 
 
 def test_a_stratum_with_no_samples_is_simply_absent_and_the_page_says_so(drawn):
