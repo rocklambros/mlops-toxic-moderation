@@ -213,7 +213,17 @@ load-bearing in a way they were not when the window was hours long.
   catch a condition that was already true when it was written;
 - real user traffic reaches `/predict` from anyone other than the operator or a grader;
 - port 8503 acquires an ingress rule on any security group, in which case even the console is
-  reachable in the clear.
+  reachable in the clear;
+- a reverse proxy (Caddy, per the alternative above, or anything else) is introduced in front
+  of the backend listener on 8000. `backend.app.peer_is_public` decides the reviewer-route
+  guard from `request.client.host`, and that is the true peer only because nothing sits in
+  front of this listener today. A proxy in front of it replaces that value with the proxy's
+  own address — typically loopback — so the guard's `is_global` check is False for every
+  caller, public included, and the control silently inverts to fully permissive: no
+  exception, no failing test, just an internet-reachable reviewer queue again. The guard has
+  to move to a proxy-aware source of the peer address (a proxy protocol line, or a header the
+  proxy sets and strips on the client-facing side) before that listener gets a proxy in front
+  of it, not after.
 
 The first of those is now a live possibility rather than a hypothetical, because the window
 has no close date. If it fires, Caddy with Let's Encrypt is the answer, not an ALB — the

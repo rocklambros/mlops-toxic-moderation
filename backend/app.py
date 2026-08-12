@@ -135,6 +135,19 @@ def peer_is_public(host: str | None) -> bool:
     of this listener (docs/tls-decision.md), so `request.client.host` is the true peer and the
     only non-address value it takes is an in-process test client. X-Forwarded-For is never
     consulted, here or in `caller_identity`: a header a caller sets cannot be a trust input.
+
+    PRECONDITION, not an aside: this function is correct only as long as that stays true.
+    `docs/tls-decision.md` names Caddy as the accepted next move if the demo window outlives
+    the assignment, and Caddy is a reverse proxy. Put one in front of this listener and
+    `request.client.host` stops being the caller's address -- it becomes the proxy's, typically
+    loopback -- so `ipaddress.ip_address(host).is_global` is False for every caller, public
+    included, and the guard this function backs inverts to fully permissive with no exception
+    raised and no test failing locally. Do not patch this speculatively by trusting
+    X-Forwarded-For: a header a caller sets is not a trust input, which is the same reason it
+    is not consulted today. When a proxy is actually introduced, the peer source this function
+    reads has to move with it (a proxy protocol line, or a header the proxy itself sets and
+    strips from the client-facing side) -- see the tripwire in `docs/tls-decision.md`'s
+    "Re-open this decision if" list.
     """
     if not host:
         return False
