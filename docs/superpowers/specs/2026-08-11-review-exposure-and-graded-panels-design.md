@@ -97,9 +97,12 @@ because it is the anonymous mechanism rubric 3.2 grades. `/review/login` keeps i
 which remains the binding control for anything inside the VPC.
 
 **What this does not do.** It does not delete the shared secret, and it does not separate the
-reviewer API from the public UI container, which shares the frontend instance's security group.
-The secret remains the only control on that path. This spec closes the internet exposure and
-says plainly that it closes nothing else.
+reviewer API from the public UI container: both run on the frontend instance and therefore
+share its private IP, and a security group attaches to the instance's network interface, not
+to one container on it, so no group boundary distinguishes them. `peer_is_public` cannot either
+-- it discriminates on the peer address, and that address is the same for both. The secret
+remains the only control on that path. This spec closes the internet exposure and says plainly
+that it closes nothing else.
 
 ## 4. What changes
 

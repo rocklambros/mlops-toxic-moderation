@@ -71,7 +71,7 @@ Two things follow, and neither is walked back anywhere else in this document:
   private address -- so an observer inside the VPC reads it and an observer outside cannot
   reach the route at all. No path this project operates ever sent the secret across the public
   listener; the exposure was that the route *accepted* it, which made it brute-forceable
-  online, and `backend/review_api.py:161` metered that at five attempts a minute per peer.
+  online, and `backend/review_api.py:162` metered that at five attempts a minute per peer.
 - **The reviewer capability is restricted, not structurally out of reach.** What is
   structurally out of reach is the Streamlit console that renders it.
 
@@ -83,7 +83,7 @@ exposure and it is not TLS: it does not stop an observer reading the secret in f
 
 ## What is exposed, and on what
 
-| Listener | Port | Ingress as of 2026-08-10 | Carries |
+| Listener | Port | Ingress as of 2026-08-11 | Carries |
 |---|---|---|---|
 | FastAPI `/predict`, `/health` | 8000 | **`0.0.0.0/0`** plus the operator address | Comment text submitted by anyone holding the demo API key |
 | **FastAPI reviewer routes** | **8000, the same listener** | **VPC peers only** -- a globally routable peer gets 404 (`backend/app.py`) | **The reviewer shared secret on `/review/login`, a bearer session token, and raw comment text from `/review/pending`** |
@@ -114,10 +114,12 @@ frontend instance to the backend instance on 8000, and it does not change where 
 signing in from that console sends the shared secret.
 
 This narrows the exposure; it does not remove the credential, and the reason is worth
-recording. The user-facing Streamlit and the reviewer console share EC2 #2 and therefore share
-one security group, so the internet-facing container reaches these routes from a private
-address and the peer guard does not see it. The shared secret is the only control on that path.
-A 2026-08-11 design that would have removed it -- by relocating the console and serving the
+recording. The two containers share the **instance**, and therefore its private IP.
+`peer_is_public` discriminates on the peer address, and a security group is attached per
+network interface rather than per container -- so no group boundary and no IP test can
+separate two processes on one host. The public UI container reaches these routes from the
+same private address the reviewer console does, and the shared secret is what stands between
+them. A 2026-08-11 design that would have removed it -- by relocating the console and serving the
 routes on an unpublished port -- was refuted: it moved an adversarial-input renderer onto the
 tier that holds the RDS master credential, reversing premortem H16. See
 `docs/superpowers/specs/2026-08-11-reviewer-loopback-no-secret-design.md` section 0.
