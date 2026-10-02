@@ -4,8 +4,6 @@
 #
 #    pip-compile --cert=None --client-cert=None --generate-hashes --index-url=None --output-file=requirements/security.txt --pip-args=None requirements/security.in
 #
---only-binary :all:
-
 annotated-types==0.8.0 \
     --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0
     # via pydantic
@@ -498,7 +496,7 @@ pip-api==0.0.34 \
     # via pip-audit
 pip-audit==2.7.3 \
     --hash=sha256:46a11faee3323f76adf7987de8171daeb660e8f57d8088cc27fb1c1e5c7747b0
-    # via -r requirements/security.in
+    # via -r security.in
 pip-requirements-parser==32.0.1 \
     --hash=sha256:4659bc2a667783e7a15d190f6fccf8b2486685b6dba4c19c3876314769c57526
     # via pip-audit
@@ -879,7 +877,7 @@ semgrep==1.172.0 \
     --hash=sha256:d8b94af4266a575287ad2cd844573743ab4fe58f6bfb6d9229327807937eade3 \
     --hash=sha256:e32868faeb67b241bbd3fabd82a12fba4b467464dedde9da285b9bf78e808ba3 \
     --hash=sha256:f13ddebc870e784b03c9247f095720f49f67244eca1e7da493364f55c65b4493
-    # via -r requirements/security.in
+    # via -r security.in
 six==1.17.0 \
     --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274
     # via html5lib
@@ -966,8 +964,9 @@ typing-inspection==0.4.2 \
     #   mcp
     #   pydantic
     #   pydantic-settings
-urllib3==2.7.0 \
-    --hash=sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897
+urllib3==2.8.0 \
+    --hash=sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3 \
+    --hash=sha256:63bf2ead4c879426ebf22ef2a781eeb4aa3b4ae798a0435506f8687fd5bb9b63
     # via
     #   requests
     #   semgrep
